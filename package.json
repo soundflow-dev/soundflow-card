@@ -1,0 +1,28 @@
+{
+  "name": "soundflow-card",
+  "version": "0.1.0",
+  "description": "Cartão Lovelace elegante para Music Assistant",
+  "main": "dist/soundflow-card.js",
+  "scripts": {
+    "build": "rollup -c",
+    "watch": "rollup -c --watch",
+    "lint": "eslint src"
+  },
+  "keywords": [
+    "home-assistant",
+    "lovelace",
+    "music-assistant",
+    "card",
+    "hacs"
+  ],
+  "author": "SoundFlow Contributors",
+  "license": "MIT",
+  "dependencies": {
+    "lit": "^3.1.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^15.3.1",
+    "@rollup/plugin-terser": "^0.4.4",
+    "rollup": "^4.60.2"
+  }
+}

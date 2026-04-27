@@ -1,0 +1,33 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EA3572"/>
+      <stop offset="50%" stop-color="#C729C7"/>
+      <stop offset="100%" stop-color="#7B3FE4"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="30%" cy="20%" r="80%">
+      <stop offset="0%" stop-color="#FF6B9D" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#FF6B9D" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="dot-glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="112" ry="112" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="112" ry="112" fill="url(#glow)"/>
+
+  <path d="M 110 280 Q 180 180, 256 256 T 402 232"
+        fill="none"
+        stroke="white"
+        stroke-width="22"
+        stroke-linecap="round"
+        opacity="0.95"/>
+
+  <circle cx="110" cy="280" r="20" fill="white" filter="url(#dot-glow)"/>
+  <circle cx="402" cy="232" r="20" fill="white" filter="url(#dot-glow)"/>
+</svg>

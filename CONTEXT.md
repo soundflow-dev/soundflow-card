@@ -9,89 +9,65 @@ Card Lovelace personalizado para Home Assistant que controla o **Music Assistant
 - **Players MA**: Sala, Cozinha, Quarto, Escritório, Casa de Banho, Dressing
 - **Providers configurados**: Apple Music (Bruno + Maria), TuneIn
 - **Sistema**: macOS
-- **GitHub**: `soundflow-dev/soundflow-card`
+- **GitHub**: `soundflow-dev/soundflow-card` (recriado limpo, v0.1.0 publicada)
 - **Pasta local**: `~/Desktop/soundflow-card`
 
 ## Versão atual
-**v0.1.0** — primeira release pública (instalação limpa, repo recriado de raiz)
+**v0.2.0** (~90 KB minificado)
 
 ## Stack
 - Web Component nativo (extends HTMLElement) — **sem Lit**, sem dependências runtime
 - Build: Rollup + plugin-node-resolve + terser
-- Bundle final: `dist/soundflow-card.js` (~82 KB minificado)
+- Bundle final: `dist/soundflow-card.js`
 
-## Estrutura do projeto
+## Estrutura
 ```
 soundflow-card/
-├── hacs.json
-├── README.md
-├── info.md
-├── LICENSE  (MIT)
-├── .gitignore
-├── package.json
-├── package-lock.json
-├── rollup.config.js
-├── assets/  (logos)
 ├── src/
-│   ├── soundflow-card.js   (~1700 linhas — classe principal consolidada)
-│   ├── styles.js           (CSS partilhado + ICONS dict + logo SVG)
-│   ├── providers.js        (PROVIDER_DEFS + PROVIDER_SVGS)
-│   ├── ma-api.js           (wrapper WebSocket/services do MA)
-│   └── editor.js           (editor visual de configuração)
-└── dist/
-    └── soundflow-card.js   (bundle final)
+│   ├── soundflow-card.js   (~2100 linhas — classe principal)
+│   ├── styles.js, providers.js, ma-api.js, editor.js
+└── dist/soundflow-card.js
 ```
 
-## Funcionalidades v0.1.0
-- Mini player no dashboard (artwork + título + artista + sala + 3 botões)
-- Modal completo (artwork grande, controlos shuffle/prev/play/next/repeat, source/speakers buttons, search, volume +/−/mute, igualar volume)
-- Popup "Escolher fonte" — descobre providers via `subentries` do config_entry, fallback inferência via biblioteca
-- Popup "Source detail" → Tracks (aleatório) + Playlists
-- Popup "Rádios favoritas" — lê favoritos de tipo radio
-- Popup "Favoritos do MA" — **menu de categorias** (Playlists / Álbuns / Artistas / Músicas) com contagem; cada categoria abre lista própria
-- Popup **unificado** "Player & Colunas" (substitui o antigo split Player ativo + Colunas)
-  - Cada linha: checkbox para sincronizar + tap para definir como principal
-  - Botões "Agrupar selecionadas" / "Desagrupar tudo" (executa `media_player.join`/`unjoin` imediatamente)
-  - Volume individual + igualar volume
-  - Indicador "sincronizado" no subtitle (lê `group_members`)
-- Popup "Definições" — players + providers + botões "Re-detetar providers" / "Editar configuração" / "GitHub ↗"
-- Popup "Search results" — pesquisa com debounce 600ms, mínimo 3 chars
-- Editor visual via UI do HA
-- Tema dark/light adaptativo via CSS vars do HA
+## Funcionalidades v0.2.0 — o que mudou face à v0.1.0
+1. **Anti-flicker** real em popup e modal: soft refresh em vez de destroy/recreate. Preserva foco e cursor do input de pesquisa.
+2. **Auto-group/ungroup**: ao tocar/destocar checkbox de uma coluna, o card chama `media_player.join`/`unjoin` automaticamente em background. Sem botões "Agrupar"/"Desagrupar".
+3. **Leader implícito** dinâmico via `_getImplicitLeader()` — heurística: a tocar > volume mais alto > primeiro da lista. Não é armazenado, só calculado.
+4. **Tap em qualquer parte da linha** = toggle (uniforme). Pequeno ponto rosa indica de onde sai o som (sem texto "principal").
+5. **Volume bar atualiza em tempo real** — `_computeModalHash` inclui volumes de todos os efetivos; popup tem `_computePopupHash` próprio.
+6. **Mute global no card principal** — aplica a todas as colunas selecionadas; se nenhuma estiver selecionada, aplica a todas.
+7. **% volume visível** na modal grande, ao lado do slider.
+8. **Pesquisa com botão lupa** clicável (gradiente rosa) **+ Enter no teclado**, sem auto-search. Botão `×` para limpar.
+9. **Capas robustas** nos resultados: helper `_getItemImage()` lê `image.path`, `metadata.images[]` e `images[]`. Avatares circulares para artistas, retangulares para tracks/álbuns.
+10. **Provider expandido para 4 categorias navegáveis** (Tracks/Albums/Artists/Playlists) com contagens. Cada uma abre lista filtrada por provider; "Tracks" tem botão "Tocar tudo aleatório" no topo.
 
-## Características técnicas (em v0.1.0)
-- **Anti-flicker**: `_computeRenderHash()` evita re-renders desnecessários a cada `set hass`. Barra de progresso atualizada in-place.
-- **Barreira de keyboard**: shadow root intercepta keydown/keyup/keypress em inputs antes de chegarem ao Assist.
-- **Deteção de providers em camadas**:
-  - Camada 1: `config_entries/get` → `entry.subentries` (modo moderno do MA)
-  - Camada 2: fallback inferência via `get_library` (limit 200 por tipo)
-  - Botão "Re-detetar providers" nas Definições para forçar refresh
-- **Logo nas listas**: helper `_renderSfWave(size, color)` desenha a onda do logo em SVG stroke
-- **Search**: debounce 600ms, mínimo 3 chars
+## Funcionalidades já existentes (v0.1.0)
+- Mini player + modal completo
+- Popup "Escolher fonte" com providers detetados via subentries (fallback inferência)
+- Popup "Rádios favoritas"
+- Popup "Favoritos do MA" — menu por categoria (Playlists / Álbuns / Artistas / Músicas)
+- Popup "Definições" — players + providers + Editar config + Re-detetar providers + GitHub
+- Editor visual via UI do HA
+- Tema dark/light adaptativo
 
 ## Notas técnicas importantes
 - `music_assistant.get_library`: requer `config_entry_id`, devolve `result.response.items`
 - `music_assistant.play_media`: aceita array de URIs em `media_id`
-- "Tocar tudo aleatório": `media_player.shuffle_set` true → `play_media` com array
+- "Tocar tudo aleatório" filtra até 500 tracks, depois `shuffle_set` true → `play_media` array
 - Players MA: `entityRegistry.platform === 'music_assistant'` OU `attributes.mass_player_id`
 - Multi-speaker: `media_player.join` / `media_player.unjoin`
 - Providers: `config_entries/get` → `entry.subentries[].data.{provider_domain, instance_id}`
-- Custom elements: `soundflow-card`, `soundflow-card-editor`
-
-## Avisos dados ao utilizador
-- "Tocar tudo aleatório" filtra até 500 tracks da biblioteca (lento em bibliotecas grandes)
-- Providers menos comuns caem em ícone genérico
-- "Editar configuração" depende de o dashboard estar em modo edit (Lovelace)
+- Soft-refresh: `_renderPopup` e `_renderModal` substituem só o conteúdo interno (`<div class="sf-popup">` e `#sf-modal-content`) sem remover o overlay; preserva foco do input de pesquisa
+- Auto-grouping: `_syncGrouping()` é idempotente — só executa join/unjoin se diferir do estado atual
+- Leader implícito: nunca armazenado, sempre calculado em runtime via `_getImplicitLeader()`
 
 ## Onde estávamos
-Bruno apagou a instalação antiga (HA + GitHub) e está a criar repo limpo a partir do zip v0.1.0. Esta é a release inaugural pública.
+Acabámos de produzir v0.2.0 com 10 correções concretas (1 a 10 acima). Bruno vai testar e reportar.
 
 ## Próximos passos previsíveis
-- Testar v0.1.0 e iterar bugs reportados
+- Testar v0.2.0 e iterar bugs
 - Polimento de ícones de providers (apple_music_artwork-style)
 - Suporte a queues/upcoming
-- Otimizar listas longas (virtual scrolling se necessário)
+- Virtual scrolling para listas longas (Apple Music tem 1500+ tracks)
 - Botão "favoritar" no mini-player
-
-## Como continuar a conversa
-Diz-me o problema/feature seguinte. Se precisares ver o código atual, anexa o zip que tens, ou pede-me para mostrar partes específicas.
+- Possivelmente: paginação/infinite scroll nas listas de provider

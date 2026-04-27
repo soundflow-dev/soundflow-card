@@ -1,6 +1,6 @@
 {
   "name": "soundflow-card",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Cartão Lovelace elegante para Music Assistant",
   "main": "dist/soundflow-card.js",
   "scripts": {

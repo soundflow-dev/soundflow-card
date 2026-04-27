@@ -1,5 +1,5 @@
 // soundflow-card.js - Card SoundFlow consolidado
-// Versão: 0.1.0 | Licença: MIT
+// Versão: 0.2.0 | Licença: MIT
 
 import './editor.js';
 import { SOUNDFLOW_STYLES, ICONS } from './styles.js';
@@ -19,7 +19,7 @@ import {
   maGetLibrary,
 } from './ma-api.js';
 
-const CARD_VERSION = '0.1.0';
+const CARD_VERSION = '0.2.0';
 
 console.info(
   `%c SOUNDFLOW-CARD %c ${CARD_VERSION} `,
@@ -205,6 +205,96 @@ class SoundFlowCard extends HTMLElement {
     }
   }
 
+  /**
+   * Calcula dinamicamente qual o leader implícito da seleção atual.
+   * Heurística:
+   *   1. Se algum dos selecionados está a tocar, esse é o leader
+   *   2. Senão, o que tem volume_level mais alto (provavelmente o "principal" físico)
+   *   3. Fallback: o primeiro selecionado
+   * Retorna null se a seleção estiver vazia.
+   */
+  _getImplicitLeader() {
+    const ids = this._selectedSpeakers.length > 0
+      ? this._selectedSpeakers
+      : (this._activePlayer ? [this._activePlayer.entity_id] : []);
+    if (ids.length === 0) return null;
+    if (ids.length === 1) return ids[0];
+
+    // 1. A tocar?
+    for (const id of ids) {
+      const s = this._hass.states[id];
+      if (s && s.state === 'playing') return id;
+    }
+    // 2. Volume mais alto
+    let best = ids[0];
+    let bestVol = -1;
+    for (const id of ids) {
+      const s = this._hass.states[id];
+      const vol = s ? (s.attributes.volume_level || 0) : 0;
+      if (vol > bestVol) { bestVol = vol; best = id; }
+    }
+    return best;
+  }
+
+  /**
+   * Reconcilia o grouping real do HA com `_selectedSpeakers`.
+   * - Se 0 ou 1 selecionados: desagrupa o que estiver agrupado dos selecionados/leader anterior
+   * - Se 2+ selecionados: junta-os todos com o leader implícito
+   * Idempotente: se já está sincronizado, não faz nada.
+   */
+  async _syncGrouping() {
+    if (!this._hass) return;
+    const selected = this._selectedSpeakers.slice();
+    const leader = this._getImplicitLeader();
+
+    // CASE A: 0 ou 1 selecionados → garantir que ninguém está agrupado dos players visíveis
+    if (selected.length <= 1) {
+      const tasks = [];
+      for (const p of this._players) {
+        const s = this._hass.states[p.entity_id];
+        const members = s && s.attributes.group_members;
+        if (Array.isArray(members) && members.length > 1) {
+          tasks.push(unjoinPlayer(this._hass, p.entity_id).catch(() => {}));
+        }
+      }
+      if (tasks.length > 0) await Promise.all(tasks);
+      return;
+    }
+
+    // CASE B: 2+ selecionados — verificar se já estão sincronizados como pretendido
+    const leaderState = this._hass.states[leader];
+    const currentMembers = leaderState && Array.isArray(leaderState.attributes.group_members)
+      ? leaderState.attributes.group_members.slice().sort()
+      : [];
+    const desired = selected.slice().sort();
+    const sameSet = currentMembers.length === desired.length
+      && currentMembers.every((m, i) => m === desired[i]);
+
+    if (sameSet) return; // já está como queremos
+
+    // Antes de juntar com o novo grupo, desagrupar quaisquer outros grupos órfãos
+    const orphanTasks = [];
+    for (const p of this._players) {
+      if (selected.includes(p.entity_id)) continue;
+      const s = this._hass.states[p.entity_id];
+      const members = s && s.attributes.group_members;
+      if (Array.isArray(members) && members.length > 1) {
+        orphanTasks.push(unjoinPlayer(this._hass, p.entity_id).catch(() => {}));
+      }
+    }
+    if (orphanTasks.length > 0) await Promise.all(orphanTasks);
+
+    // Aplicar novo grouping
+    try {
+      await groupPlayers(this._hass, leader, selected);
+      // Atualizar activePlayer para o leader implícito (mas sem mexer em tudo)
+      const leaderObj = this._players.find((p) => p.entity_id === leader);
+      if (leaderObj) this._activePlayer = leaderObj;
+    } catch (e) {
+      console.warn('[SoundFlow] Auto-sync grouping failed:', e);
+    }
+  }
+
   _renderProviderIcon(def, size = 14) {
     if (!def || def.icon === 'music' || !def.icon) {
       return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="white">${PROVIDER_SVGS.music}</svg>`;
@@ -328,15 +418,22 @@ class SoundFlowCard extends HTMLElement {
     const p = this._activePlayer;
     if (!p) return 'none';
     const a = p.attributes || {};
+    // Volume médio dos efetivos
+    const eff = this._getEffectiveSpeakers();
+    const effVols = eff.map((id) => {
+      const s = this._hass.states[id];
+      return s ? `${Math.round((s.attributes.volume_level || 0) * 100)}:${s.attributes.is_volume_muted ? 1 : 0}` : '';
+    }).join(';');
     return [
       p.entity_id, p.state,
       a.media_title || '', a.media_artist || '', a.media_album_name || '',
       a.entity_picture_local || a.entity_picture || '',
       a.shuffle, a.repeat,
-      a.volume_level || 0, a.is_volume_muted ? 1 : 0,
+      effVols,
       this._selectedSource ? this._selectedSource.label : '',
       this._selectedSpeakers.join(','),
       this._searchQuery,
+      this._searchInProgress ? 1 : 0,
     ].join('|');
   }
 
@@ -366,6 +463,11 @@ class SoundFlowCard extends HTMLElement {
         this._modalLastRenderHash = mhash;
         this._renderModal();
       }
+    }
+
+    // Auto-refresh do popup se estiver aberto (volume changes, etc.)
+    if (this._popup) {
+      this._renderPopup();
     }
   }
 
@@ -519,7 +621,30 @@ class SoundFlowCard extends HTMLElement {
 
   _renderModal() {
     const existing = this.shadowRoot.querySelector('.sf-modal-overlay:not(.sf-popup-overlay)');
-    if (existing) existing.remove();
+
+    if (existing) {
+      // Soft refresh: substituir só o conteúdo interno
+      const inner = existing.querySelector('#sf-modal-content');
+      if (inner) {
+        // Preservar foco do input de pesquisa se existir
+        const focusedSearch = inner.querySelector('[data-action="search-input"]:focus');
+        const cursorPos = focusedSearch ? focusedSearch.selectionStart : null;
+
+        inner.innerHTML = this._renderModalBody();
+        this._attachModalListeners(existing);
+
+        if (focusedSearch !== null && cursorPos !== null) {
+          const newSearch = inner.querySelector('[data-action="search-input"]');
+          if (newSearch) {
+            newSearch.focus();
+            try { newSearch.setSelectionRange(cursorPos, cursorPos); } catch (e) { /* ignore */ }
+          }
+        }
+
+        if (this._popup) this._renderPopup();
+        return;
+      }
+    }
 
     const overlay = document.createElement('div');
     overlay.className = 'sf-modal-overlay';
@@ -596,14 +721,22 @@ class SoundFlowCard extends HTMLElement {
     }
 
     const searchBarHtml = isRadio ? '' : `
-      <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;background:var(--sf-button-bg);border:1px solid var(--sf-border);border-radius:14px;margin-bottom:14px;cursor:text;">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--sf-text-3)" stroke-width="2">${ICONS.search}</svg>
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 8px 8px 14px;background:var(--sf-button-bg);border:1px solid var(--sf-border);border-radius:14px;margin-bottom:14px;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--sf-text-3)" stroke-width="2" style="flex-shrink:0;">${ICONS.search}</svg>
         <input
           type="text"
           placeholder="Pesquisar música, artista, álbum…"
           value="${this._esc(this._searchQuery || '')}"
-          style="flex:1;background:transparent;border:none;color:var(--sf-text);font-size:13px;outline:none;font-family:inherit;"
+          style="flex:1;background:transparent;border:none;color:var(--sf-text);font-size:13px;outline:none;font-family:inherit;min-width:0;"
           data-action="search-input">
+        ${this._searchQuery ? `
+          <button class="sf-icon-btn sf-circle" style="width:32px;height:32px;flex-shrink:0;" data-action="search-clear" title="Limpar">
+            <svg width="16" height="16" viewBox="0 0 24 24">${ICONS.close}</svg>
+          </button>
+        ` : ''}
+        <button class="sf-icon-btn sf-grad" style="width:36px;height:36px;border-radius:50%;flex-shrink:0;" data-action="search-submit" title="Pesquisar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5">${ICONS.search}</svg>
+        </button>
       </div>
     `;
 
@@ -681,6 +814,7 @@ class SoundFlowCard extends HTMLElement {
         <div class="sf-vol-bar" style="flex:1;" data-action="vol-set">
           <div class="sf-vol-fill" style="width:${volPct}%"></div>
         </div>
+        <span style="font-size:13px;font-weight:500;min-width:42px;text-align:right;color:var(--sf-text-2);flex-shrink:0;">${volPct}%</span>
         <button class="sf-icon-btn sf-circle" style="width:48px;height:48px;flex-shrink:0;" data-action="vol-up" title="Volume +">
           <svg width="28" height="28" viewBox="0 0 24 24">${ICONS.plus}</svg>
         </button>
@@ -706,12 +840,16 @@ class SoundFlowCard extends HTMLElement {
     if (searchInput) {
       searchInput.addEventListener('click', (e) => e.stopPropagation());
       searchInput.addEventListener('input', (e) => {
+        // Apenas atualizar o estado interno; não pesquisa automaticamente.
+        // Atualizar sem re-render para preservar foco.
         this._searchQuery = e.target.value;
-        this._scheduleSearch();
       });
       searchInput.addEventListener('keydown', (e) => {
         e.stopPropagation();
-        if (e.key === 'Escape') {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          this._performSearch();
+        } else if (e.key === 'Escape') {
           this._searchQuery = '';
           this._searchResults = null;
           if (this._popup === 'search-results') {
@@ -759,8 +897,16 @@ class SoundFlowCard extends HTMLElement {
         adjustVolume(this._hass, this._getEffectiveSpeakers(), 0.05); break;
       case 'vol-down':
         adjustVolume(this._hass, this._getEffectiveSpeakers(), -0.05); break;
-      case 'mute':
-        toggleMute(this._hass, this._getEffectiveSpeakers()); break;
+      case 'mute': {
+        // Mute global: aplica a todas as colunas selecionadas; se nenhuma estiver
+        // selecionada, aplica a todas as colunas visíveis (para corresponder à
+        // expectativa de um botão "silenciar tudo" no card principal).
+        const targets = this._selectedSpeakers.length > 0
+          ? this._selectedSpeakers
+          : this._players.map((p) => p.entity_id);
+        await toggleMute(this._hass, targets);
+        break;
+      }
       case 'equalize':
         equalizeVolumes(this._hass, this._getEffectiveSpeakers(), this._equalizeLevel); break;
       case 'open-source':
@@ -772,6 +918,22 @@ class SoundFlowCard extends HTMLElement {
       case 'select-player':
         // Popup unificado Player + Colunas
         this._popup = 'speakers'; this._renderPopup(); break;
+
+      case 'search-submit':
+        // Disparar pesquisa imediata (usa o valor já guardado em _searchQuery)
+        this._performSearch();
+        break;
+
+      case 'search-clear':
+        this._searchQuery = '';
+        this._searchResults = null;
+        if (this._popup === 'search-results') {
+          this._popup = null;
+          this._renderPopup();
+        }
+        this._renderModal();
+        break;
+
       case 'close-modal':
         this._closeModal(); break;
     }
@@ -791,9 +953,32 @@ class SoundFlowCard extends HTMLElement {
 
   _renderPopup() {
     const existing = this.shadowRoot.querySelector('.sf-popup-overlay');
-    if (existing) existing.remove();
-    if (!this._popup) return;
 
+    // Sem popup pedido → fechar
+    if (!this._popup) {
+      if (existing) existing.remove();
+      this._popupHash = null;
+      return;
+    }
+
+    // Calcular hash para detetar mudanças reais (evita re-render se nada muda)
+    const newHash = this._computePopupHash();
+
+    // Se já existe um overlay e o conteúdo é o mesmo, não tocar nada
+    if (existing && this._popupHash === newHash) return;
+
+    // Se já existe um overlay, fazer soft refresh — substituir só o conteúdo interno
+    if (existing) {
+      const inner = existing.querySelector('.sf-popup');
+      if (inner) {
+        inner.innerHTML = this._renderPopupBody();
+        this._popupHash = newHash;
+        this._attachPopupListeners(existing);
+        return;
+      }
+    }
+
+    // Caso contrário, criar overlay novo
     const popup = document.createElement('div');
     popup.className = 'sf-modal-overlay sf-popup-overlay';
     popup.style.zIndex = '10000';
@@ -801,17 +986,50 @@ class SoundFlowCard extends HTMLElement {
     popup.addEventListener('click', (e) => {
       if (e.target === popup) {
         this._popup = null;
+        this._popupHash = null;
         popup.remove();
       }
     });
     this.shadowRoot.appendChild(popup);
+    this._popupHash = newHash;
     this._attachPopupListeners(popup);
+  }
+
+  _computePopupHash() {
+    // Hash que muda quando o conteúdo do popup muda. Inclui o tipo de popup + estado relevante.
+    const type = this._popup;
+    const parts = [type];
+
+    if (type === 'speakers') {
+      // Estado de seleção + volumes + grouping de cada player
+      for (const p of this._players) {
+        const s = this._hass.states[p.entity_id];
+        const vol = s ? Math.round((s.attributes.volume_level || 0) * 100) : 0;
+        const muted = s && s.attributes.is_volume_muted ? 1 : 0;
+        const grouped = s && Array.isArray(s.attributes.group_members) && s.attributes.group_members.length > 1 ? 1 : 0;
+        const selected = this._selectedSpeakers.includes(p.entity_id) ? 1 : 0;
+        parts.push(`${p.entity_id}:${p.state}:${vol}:${muted}:${grouped}:${selected}`);
+      }
+    } else if (type === 'settings') {
+      parts.push(this._players.length, this._providers.length);
+    } else if (type === 'search-results') {
+      parts.push(this._searchQuery, this._searchInProgress ? 1 : 0,
+        this._searchResults ? Object.keys(this._searchResults).map((k) => `${k}:${(this._searchResults[k] || []).length}`).join(',') : 'none');
+    } else if (type === 'source' || type === 'source-detail' || type === 'source-favorites') {
+      parts.push(JSON.stringify(this._sourceDetailContext || null), JSON.stringify(this._popupData || null));
+    } else {
+      // popups de listas (playlists, radios, favorites-category)
+      parts.push(JSON.stringify(this._popupData || null));
+    }
+
+    return parts.join('|');
   }
 
   _renderPopupBody() {
     switch (this._popup) {
       case 'source': return this._renderSourcePopup();
       case 'source-detail': return this._renderSourceDetailPopup();
+      case 'source-provider-category': return this._renderSourceProviderCategoryPopup();
       case 'source-playlists': return this._renderSourcePlaylistsPopup();
       case 'source-radios': return this._renderSourceRadiosPopup();
       case 'source-favorites': return this._renderSourceFavoritesPopup();
@@ -873,15 +1091,24 @@ class SoundFlowCard extends HTMLElement {
       }
 
       case 'select-source-provider': {
-        this._sourceDetailContext = {
-          kind: 'provider',
-          instance_id: element.dataset.instanceId,
-          domain: element.dataset.domain,
-          name: element.dataset.name,
-          gradient: element.dataset.gradient,
-        };
+        // Pode ser entrada inicial (clicaste num provider) ou back (do popup de categoria)
+        if (element.dataset.instanceId) {
+          this._sourceDetailContext = {
+            kind: 'provider',
+            instance_id: element.dataset.instanceId,
+            domain: element.dataset.domain,
+            name: element.dataset.name,
+            gradient: element.dataset.gradient,
+          };
+        }
         this._popup = 'source-detail';
-        this._renderPopup();
+        await this._loadProviderCategoryCounts();
+        break;
+      }
+      case 'open-provider-category': {
+        const cat = element.dataset.category;
+        this._popup = 'source-provider-category';
+        await this._loadProviderCategory(cat);
         break;
       }
       case 'select-source-radios':
@@ -939,63 +1166,26 @@ class SoundFlowCard extends HTMLElement {
         this._toggleSpeaker(element.dataset.entityId);
         this._renderPopup();
         this._renderModal();
+        // Auto-grouping em background — não bloqueia a UI
+        this._syncGrouping();
         break;
       case 'select-all-speakers':
         this._selectAllSpeakers();
         this._renderPopup();
         this._renderModal();
+        this._syncGrouping();
         break;
       case 'speaker-vol-up':
-        adjustVolume(this._hass, [element.dataset.entityId], 0.05); break;
+        await adjustVolume(this._hass, [element.dataset.entityId], 0.05);
+        this._renderPopup();
+        break;
       case 'speaker-vol-down':
-        adjustVolume(this._hass, [element.dataset.entityId], -0.05); break;
+        await adjustVolume(this._hass, [element.dataset.entityId], -0.05);
+        this._renderPopup();
+        break;
       case 'equalize-popup':
-        equalizeVolumes(this._hass, this._getEffectiveSpeakers(), this._equalizeLevel); break;
-
-      case 'apply-grouping': {
-        const ids = this._selectedSpeakers;
-        if (ids.length < 2) {
-          // sem o que agrupar; pode ser 1 (sem efeito) ou 0
-          break;
-        }
-        const leader = (this._activePlayer && ids.includes(this._activePlayer.entity_id))
-          ? this._activePlayer.entity_id
-          : ids[0];
-        try {
-          await groupPlayers(this._hass, leader, ids);
-          // Se o leader não era o activePlayer, passa a ser
-          if (!this._activePlayer || this._activePlayer.entity_id !== leader) {
-            this._activePlayer = this._players.find((p) => p.entity_id === leader) || this._activePlayer;
-          }
-        } catch (e) {
-          console.warn('[SoundFlow] Group failed:', e);
-        }
+        await equalizeVolumes(this._hass, this._getEffectiveSpeakers(), this._equalizeLevel);
         this._renderPopup();
-        this._renderModal();
-        break;
-      }
-
-      case 'ungroup-all': {
-        // Desagrupar todos os players actualmente agrupados
-        const tasks = [];
-        for (const p of this._players) {
-          const stateObj = this._hass.states[p.entity_id];
-          const members = stateObj && stateObj.attributes.group_members;
-          if (Array.isArray(members) && members.length > 1) {
-            tasks.push(unjoinPlayer(this._hass, p.entity_id).catch(() => {}));
-          }
-        }
-        try { await Promise.all(tasks); } catch (e) { /* ignore */ }
-        this._renderPopup();
-        this._renderModal();
-        break;
-      }
-
-      case 'set-active-player':
-        this._activePlayer = this._players.find((p) => p.entity_id === element.dataset.entityId);
-        // Não fechar o popup — fica aberto para configurar grouping/volumes
-        this._renderPopup();
-        this._renderModal();
         break;
     }
   }
@@ -1095,6 +1285,53 @@ class SoundFlowCard extends HTMLElement {
   _renderSourceDetailPopup() {
     const ctx = this._sourceDetailContext || {};
     const def = getProviderDef(ctx.domain);
+    const data = this._popupData || {};
+    const counts = data.providerCounts || {};
+
+    let body;
+    if (data.loading) {
+      body = '<div class="sf-loader">A contar items…</div>';
+    } else if (data.error) {
+      body = `<div class="sf-empty">${this._esc(data.error)}</div>`;
+    } else {
+      const categories = [
+        { key: 'track',    label: 'Músicas',  subtitle: 'Tocar tudo aleatório ou escolher faixa', icon: 'music' },
+        { key: 'album',    label: 'Álbuns',   subtitle: 'Escolher um álbum',                       icon: 'music' },
+        { key: 'artist',   label: 'Artistas', subtitle: 'Escolher um artista',                     icon: 'artist' },
+        { key: 'playlist', label: 'Playlists', subtitle: 'Escolher uma playlist',                  icon: 'playlist' },
+      ];
+      body = `
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          ${categories.map((c) => {
+            const n = counts[c.key];
+            const subtitleText = n === undefined
+              ? c.subtitle
+              : (n === 0 ? 'Nada nesta categoria' : (n === 1 ? `1 item` : `${n} items · ${c.subtitle}`));
+            const disabled = n === 0;
+            // Ícone visual por categoria
+            const iconSvg = c.icon === 'music' ? PROVIDER_SVGS.music
+              : c.icon === 'playlist' ? ICONS.playlist
+              : '<path d="M12 12a4 4 0 100-8 4 4 0 000 8zm0 2c-3.3 0-10 1.7-10 5v3h20v-3c0-3.3-6.7-5-10-5z"/>';
+            const iconStroke = c.icon === 'playlist'
+              ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round">${iconSvg}</svg>`
+              : `<svg width="20" height="20" viewBox="0 0 24 24" fill="white">${iconSvg}</svg>`;
+            return `
+              <div class="sf-list-item ${disabled ? 'sf-disabled' : ''}" ${disabled ? '' : `data-action="open-provider-category" data-category="${c.key}"`}>
+                <div class="sf-list-item-icon" style="width:42px;height:42px;background:${def.gradient};">
+                  ${iconStroke}
+                </div>
+                <div class="sf-list-item-content">
+                  <div class="sf-list-item-title" style="font-size:15px;">${c.label}</div>
+                  <div class="sf-list-item-subtitle">${subtitleText}</div>
+                </div>
+                ${disabled ? '' : `<svg width="20" height="20" viewBox="0 0 24 24" fill="var(--sf-text-3)" style="flex-shrink:0;">${ICONS.chevron_right}</svg>`}
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
     return `
       <div class="sf-popup-header">
         <div style="display:flex;align-items:center;gap:12px;">
@@ -1106,30 +1343,60 @@ class SoundFlowCard extends HTMLElement {
             <div style="font-size:11px;color:var(--sf-text-3);">Escolher categoria</div>
           </div>
         </div>
+        <button class="sf-icon-btn sf-circle" style="width:36px;height:36px;" data-action="close-popup">
+          <svg width="20" height="20" viewBox="0 0 24 24">${ICONS.close}</svg>
+        </button>
       </div>
-      <div style="display:flex;flex-direction:column;gap:10px;">
-        <div class="sf-list-item" data-action="play-source-tracks">
-          <div class="sf-list-item-icon" style="width:42px;height:42px;background:${def.gradient};">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="white">${PROVIDER_SVGS.music}</svg>
-          </div>
-          <div class="sf-list-item-content">
-            <div class="sf-list-item-title" style="font-size:15px;">Tracks</div>
-            <div class="sf-list-item-subtitle">Tocar tudo em modo aleatório</div>
-          </div>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--sf-pink)">${ICONS.shuffle_play}</svg>
-        </div>
-        <div class="sf-list-item" data-action="open-source-playlists">
-          <div class="sf-list-item-icon" style="width:42px;height:42px;background:rgba(123,63,228,0.25);">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#a280ff" stroke-width="2" stroke-linecap="round">${ICONS.playlist}</svg>
-          </div>
-          <div class="sf-list-item-content">
-            <div class="sf-list-item-title" style="font-size:15px;">Playlists</div>
-            <div class="sf-list-item-subtitle">Escolher uma playlist</div>
-          </div>
-          <svg width="14" height="14" viewBox="0 0 24 24">${ICONS.chevron_right}</svg>
-        </div>
-      </div>
+      ${body}
     `;
+  }
+
+  /**
+   * Renderiza o popup com a lista de items de uma categoria de um provider.
+   * No topo, botão "Tocar tudo aleatório" (só para tracks).
+   */
+  _renderSourceProviderCategoryPopup() {
+    const data = this._popupData || {};
+    const ctx = this._sourceDetailContext || {};
+    const cat = data.categoryType || 'track';
+    const titleMap = { track: 'Músicas', album: 'Álbuns', artist: 'Artistas', playlist: 'Playlists' };
+    const def = getProviderDef(ctx.domain);
+    const isArtist = cat === 'artist';
+
+    // Cabeçalho com botão "Tocar tudo aleatório" só faz sentido para tracks
+    const shuffleAllHtml = (cat === 'track' && data.items && data.items.length > 0) ? `
+      <div class="sf-list-item" data-action="play-source-tracks" style="background:${def.gradient};border:none;margin-bottom:10px;">
+        <div class="sf-list-item-icon" style="width:42px;height:42px;background:rgba(255,255,255,0.18);">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="white">${ICONS.shuffle_play}</svg>
+        </div>
+        <div class="sf-list-item-content">
+          <div class="sf-list-item-title" style="color:white;font-size:15px;">Tocar tudo aleatório</div>
+          <div class="sf-list-item-subtitle" style="color:rgba(255,255,255,0.85);">Até 500 faixas em modo shuffle</div>
+        </div>
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="white" style="flex-shrink:0;">${ICONS.shuffle_play}</svg>
+      </div>
+    ` : '';
+
+    return this._renderListPopup({
+      title: `${titleMap[cat] || 'Items'} · ${this._esc(def.name)}`,
+      backAction: 'select-source-provider',
+      data,
+      emptyMsg: 'Sem items nesta categoria.',
+      renderIcon: (item) => {
+        const url = this._getItemImage(item);
+        const radius = isArtist ? '50%' : '10px';
+        if (url) {
+          return `<img src="${this._esc(url)}" style="width:100%;height:100%;object-fit:cover;border-radius:${radius};" onerror="this.style.display='none'">`;
+        }
+        if (isArtist) {
+          return `<svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M12 12a4 4 0 100-8 4 4 0 000 8zm0 2c-3.3 0-10 1.7-10 5v3h20v-3c0-3.3-6.7-5-10-5z"/></svg>`;
+        }
+        return `<svg width="20" height="20" viewBox="0 0 24 24" fill="white">${PROVIDER_SVGS.music}</svg>`;
+      },
+      iconBg: isArtist ? 'rgba(123,63,228,0.4)' : def.gradient,
+      mediaType: cat,
+      headerExtraHtml: shuffleAllHtml,
+    });
   }
 
   // ============================================================
@@ -1142,8 +1409,7 @@ class SoundFlowCard extends HTMLElement {
     const allSelected = selected === total && total > 0;
     const allLabel = allSelected ? '✓ Toda a casa selecionada' : 'Selecionar toda a casa';
 
-    // Detetar o estado de agrupamento real do HA
-    // Um player está agrupado se group_members tiver mais que ele próprio
+    // Detetar o estado de agrupamento real do HA + identificar o leader implícito
     const groupedIds = new Set();
     for (const p of this._players) {
       const stateObj = this._hass.states[p.entity_id];
@@ -1153,17 +1419,31 @@ class SoundFlowCard extends HTMLElement {
         members.forEach((m) => groupedIds.add(m));
       }
     }
+    const implicitLeader = this._getImplicitLeader();
+
+    // Subtitle: descrever o que está selecionado
+    let subtitle;
+    if (selected === 0) {
+      subtitle = 'Toque numa coluna para a selecionar';
+    } else if (selected === 1) {
+      const p = this._players.find((x) => x.entity_id === this._selectedSpeakers[0]);
+      subtitle = p ? `A tocar em ${this._cleanName(p.friendly_name)}` : '';
+    } else if (selected === total) {
+      subtitle = 'A tocar em toda a casa · sincronizado';
+    } else {
+      subtitle = `A tocar em ${selected} colunas · sincronizado`;
+    }
 
     return `
       <div class="sf-popup-header">
-        <span class="sf-popup-title">Player & Colunas</span>
+        <span class="sf-popup-title">Colunas</span>
         <button class="sf-icon-btn sf-circle" style="width:36px;height:36px;" data-action="close-popup">
           <svg width="20" height="20" viewBox="0 0 24 24">${ICONS.close}</svg>
         </button>
       </div>
 
-      <div style="font-size:11px;color:var(--sf-text-3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">
-        Toque na coluna para a tornar principal · ☐ para sincronizar
+      <div style="font-size:11px;color:var(--sf-text-3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:12px;">
+        ${this._esc(subtitle)}
       </div>
 
       <button style="width:100%;padding:12px;background:var(--sf-button-bg);border:1px dashed var(--sf-border);border-radius:12px;color:var(--sf-text);font-size:13px;cursor:pointer;margin-bottom:14px;font-family:inherit;" data-action="select-all-speakers">
@@ -1171,16 +1451,7 @@ class SoundFlowCard extends HTMLElement {
       </button>
 
       <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px;">
-        ${this._players.map((p) => this._renderSpeakerRow(p, groupedIds)).join('')}
-      </div>
-
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
-        <button class="sf-equalize" style="padding:11px;font-size:12px;border-radius:10px;" data-action="apply-grouping">
-          ${selected >= 2 ? `Agrupar ${selected} colunas` : 'Agrupar selecionadas'}
-        </button>
-        <button class="sf-equalize" style="padding:11px;font-size:12px;border-radius:10px;background:var(--sf-button-bg);color:var(--sf-text);border:1px solid var(--sf-border);" data-action="ungroup-all">
-          Desagrupar tudo
-        </button>
+        ${this._players.map((p) => this._renderSpeakerRow(p, groupedIds, implicitLeader)).join('')}
       </div>
 
       <button class="sf-equalize" style="width:100%;padding:11px;font-size:12px;border-radius:10px;" data-action="equalize-popup">
@@ -1189,40 +1460,42 @@ class SoundFlowCard extends HTMLElement {
     `;
   }
 
-  _renderSpeakerRow(player, groupedIds = new Set()) {
+  _renderSpeakerRow(player, groupedIds = new Set(), implicitLeader = null) {
     const isSelected = this._selectedSpeakers.includes(player.entity_id);
-    const isActive = this._activePlayer && this._activePlayer.entity_id === player.entity_id;
     const stateObj = this._hass.states[player.entity_id];
     const volPct = stateObj ? Math.round((stateObj.attributes.volume_level || 0) * 100) : 0;
     const name = this._cleanName(player.friendly_name);
     const isGrouped = groupedIds.has(player.entity_id);
+    const isLeader = isSelected && this._selectedSpeakers.length > 1 && player.entity_id === implicitLeader;
 
     const stateLabel = player.state === 'playing' ? 'A tocar'
       : player.state === 'paused' ? 'Em pausa'
       : player.state === 'idle' ? 'Inativo' : (player.state || '');
-    const subtitle = isGrouped ? `${stateLabel} · sincronizado` : stateLabel;
+    const subtitle = isLeader ? `${stateLabel} · origem do som`
+      : isGrouped ? `${stateLabel} · sincronizado`
+      : stateLabel;
 
     const checkBoxHtml = isSelected
-      ? `<div class="sf-speaker-check" style="background:var(--sf-grad);" data-action="toggle-speaker" data-entity-id="${player.entity_id}">
+      ? `<div class="sf-speaker-check" style="background:var(--sf-grad);">
            <svg width="14" height="14" viewBox="0 0 24 24">${ICONS.check}</svg>
          </div>`
-      : `<div class="sf-speaker-check" style="background:transparent;border:1.5px solid var(--sf-text-3);" data-action="toggle-speaker" data-entity-id="${player.entity_id}"></div>`;
+      : `<div class="sf-speaker-check" style="background:transparent;border:1.5px solid var(--sf-text-3);"></div>`;
 
-    const rowBg = isActive ? 'background:rgba(234,53,114,0.12);border:1px solid rgba(234,53,114,0.45);' : 'background:var(--sf-button-bg);border:1px solid var(--sf-border);';
+    // Toda a linha (incluindo o ícone) agora é clicável para toggle (uniforme)
+    const rowBg = isSelected ? 'background:rgba(234,53,114,0.10);border:1px solid rgba(234,53,114,0.30);' : 'background:var(--sf-button-bg);border:1px solid var(--sf-border);';
 
     return `
-      <div style="${rowBg}border-radius:12px;padding:10px 12px;display:flex;align-items:center;gap:10px;">
+      <div style="${rowBg}border-radius:12px;padding:10px 12px;display:flex;align-items:center;gap:10px;cursor:pointer;" data-action="toggle-speaker" data-entity-id="${player.entity_id}">
         ${checkBoxHtml}
-        <div data-action="set-active-player" data-entity-id="${player.entity_id}" style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;cursor:pointer;">
-          <div class="sf-list-item-icon" style="background:rgba(123,63,228,0.25);width:36px;height:36px;flex-shrink:0;">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a280ff" stroke-width="2">${ICONS.speaker}</svg>
+        <div class="sf-list-item-icon" style="background:rgba(123,63,228,0.25);width:36px;height:36px;flex-shrink:0;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a280ff" stroke-width="2">${ICONS.speaker}</svg>
+        </div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+            ${this._esc(name)}
+            ${isLeader ? '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--sf-pink);margin-left:6px;vertical-align:middle;box-shadow:0 0 6px var(--sf-pink);"></span>' : ''}
           </div>
-          <div style="flex:1;min-width:0;">
-            <div style="font-size:14px;font-weight:500;${isActive ? 'color:var(--sf-pink);' : ''}white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-              ${this._esc(name)}${isActive ? ' <span style="font-size:10px;letter-spacing:0.05em;text-transform:uppercase;opacity:0.85;">· principal</span>' : ''}
-            </div>
-            <div style="font-size:11px;color:var(--sf-text-3);">${subtitle}</div>
-          </div>
+          <div style="font-size:11px;color:var(--sf-text-3);">${subtitle}</div>
         </div>
       </div>
 
@@ -1422,8 +1695,76 @@ class SoundFlowCard extends HTMLElement {
     this._renderPopup();
   }
 
+  /**
+   * Filtra os items de uma biblioteca para só conter os do provider/instância atual.
+   */
+  _filterByProvider(items, ctx) {
+    if (!ctx || (!ctx.instance_id && !ctx.domain)) return items;
+    return items.filter((it) => {
+      if (it.provider === ctx.instance_id) return true;
+      if (Array.isArray(it.provider_mappings) && it.provider_mappings.some(
+        (pm) => pm.provider_instance === ctx.instance_id || pm.provider_domain === ctx.domain
+      )) return true;
+      return false;
+    });
+  }
+
+  /**
+   * Carrega contagens de items por categoria do provider atual.
+   * Mostra "loading" enquanto vai buscando, e a UI atualiza assim que disponível.
+   */
+  async _loadProviderCategoryCounts() {
+    const ctx = this._sourceDetailContext;
+    if (!this._maConfigEntryId || !ctx) {
+      this._popupData = { error: 'Provider inválido' };
+      this._renderPopup();
+      return;
+    }
+    this._popupData = { loading: true };
+    this._renderPopup();
+    try {
+      const types = ['track', 'album', 'artist', 'playlist'];
+      const counts = {};
+      // Em paralelo, mas com limite mais baixo (só preciso de contar)
+      const results = await Promise.all(
+        types.map((t) =>
+          maGetLibrary(this._hass, this._maConfigEntryId, t, { limit: 500 })
+            .then((items) => [t, this._filterByProvider(items, ctx).length])
+            .catch(() => [t, 0])
+        )
+      );
+      for (const [t, n] of results) counts[t] = n;
+      this._popupData = { providerCounts: counts };
+    } catch (e) {
+      this._popupData = { error: 'Erro ao carregar categorias' };
+    }
+    this._renderPopup();
+  }
+
+  /**
+   * Carrega items de uma categoria específica do provider atual.
+   */
+  async _loadProviderCategory(mediaType) {
+    const ctx = this._sourceDetailContext;
+    if (!this._maConfigEntryId || !ctx) {
+      this._popupData = { items: [], error: 'Provider inválido' };
+      this._renderPopup();
+      return;
+    }
+    this._popupData = { loading: true };
+    this._renderPopup();
+    try {
+      const items = await maGetLibrary(this._hass, this._maConfigEntryId, mediaType, { limit: 500 });
+      const filtered = this._filterByProvider(items, ctx);
+      this._popupData = { items: filtered, categoryType: mediaType };
+    } catch (e) {
+      this._popupData = { items: [], error: 'Erro ao carregar' };
+    }
+    this._renderPopup();
+  }
+
   _renderListPopup(opts) {
-    const { title, backAction, data, emptyMsg, renderIcon, iconBg, mediaType, mediaTypeFromItem } = opts;
+    const { title, backAction, data, emptyMsg, renderIcon, iconBg, mediaType, mediaTypeFromItem, headerExtraHtml } = opts;
     let body;
     if (data.loading) {
       body = '<div class="sf-loader">A carregar…</div>';
@@ -1446,7 +1787,7 @@ class SoundFlowCard extends HTMLElement {
             const subtitle = subtitleParts.join(' · ');
             return `
               <div class="sf-list-item" data-action="play-item" data-uri="${this._esc(item.uri)}" data-media-type="${this._esc(itemMediaType)}" data-name="${this._esc(item.name || '')}">
-                <div class="sf-list-item-icon" style="background:${iconBg};">${renderIcon(item)}</div>
+                <div class="sf-list-item-icon" style="width:48px;height:48px;background:${iconBg};">${renderIcon(item)}</div>
                 <div class="sf-list-item-content">
                   <div class="sf-list-item-title">${this._esc(item.name || 'Sem nome')}</div>
                   ${subtitle ? `<div class="sf-list-item-subtitle">${this._esc(subtitle)}</div>` : ''}
@@ -1470,6 +1811,7 @@ class SoundFlowCard extends HTMLElement {
           <svg width="20" height="20" viewBox="0 0 24 24">${ICONS.close}</svg>
         </button>
       </div>
+      ${headerExtraHtml || ''}
       ${body}
     `;
   }
@@ -1481,10 +1823,11 @@ class SoundFlowCard extends HTMLElement {
       data: this._popupData || {},
       emptyMsg: 'Não há rádios favoritas no Music Assistant.',
       renderIcon: (item) => {
-        if (item.image && item.image.path) {
-          return `<img src="${this._esc(item.image.path)}" style="width:100%;height:100%;object-fit:cover;border-radius:8px;" onerror="this.style.display='none'">`;
+        const url = this._getItemImage(item);
+        if (url) {
+          return `<img src="${this._esc(url)}" style="width:100%;height:100%;object-fit:cover;border-radius:10px;" onerror="this.style.display='none'">`;
         }
-        return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${PROVIDER_SVGS.radio}</svg>`;
+        return `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${PROVIDER_SVGS.radio}</svg>`;
       },
       iconBg: 'linear-gradient(135deg, #FFB800 0%, #FF8800 100%)',
       mediaType: 'radio',
@@ -1555,18 +1898,24 @@ class SoundFlowCard extends HTMLElement {
     const data = this._popupData || {};
     const cat = data.categoryType || 'track';
     const titleMap = { playlist: 'Playlists favoritas', album: 'Álbuns favoritos', artist: 'Artistas favoritos', track: 'Músicas favoritas' };
+    const isArtist = cat === 'artist';
     return this._renderListPopup({
       title: titleMap[cat] || 'Favoritos',
       backAction: 'select-source-favorites',
       data,
       emptyMsg: 'Sem favoritos nesta categoria.',
       renderIcon: (item) => {
-        if (item.image && item.image.path) {
-          return `<img src="${this._esc(item.image.path)}" style="width:100%;height:100%;object-fit:cover;border-radius:8px;" onerror="this.style.display='none'">`;
+        const url = this._getItemImage(item);
+        const radius = isArtist ? '50%' : '10px';
+        if (url) {
+          return `<img src="${this._esc(url)}" style="width:100%;height:100%;object-fit:cover;border-radius:${radius};" onerror="this.style.display='none'">`;
         }
-        return this._renderSfWave(16, 'white');
+        if (isArtist) {
+          return `<svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M12 12a4 4 0 100-8 4 4 0 000 8zm0 2c-3.3 0-10 1.7-10 5v3h20v-3c0-3.3-6.7-5-10-5z"/></svg>`;
+        }
+        return this._renderSfWave(18, 'white');
       },
-      iconBg: 'var(--sf-grad)',
+      iconBg: isArtist ? 'rgba(123,63,228,0.4)' : 'var(--sf-grad)',
       mediaType: cat,
     });
   }
@@ -1578,10 +1927,11 @@ class SoundFlowCard extends HTMLElement {
       data: this._popupData || {},
       emptyMsg: 'Sem playlists nesta conta.',
       renderIcon: (item) => {
-        if (item.image && item.image.path) {
-          return `<img src="${this._esc(item.image.path)}" style="width:100%;height:100%;object-fit:cover;border-radius:8px;" onerror="this.style.display='none'">`;
+        const url = this._getItemImage(item);
+        if (url) {
+          return `<img src="${this._esc(url)}" style="width:100%;height:100%;object-fit:cover;border-radius:10px;" onerror="this.style.display='none'">`;
         }
-        return `<svg width="14" height="14" viewBox="0 0 24 24" fill="white">${PROVIDER_SVGS.music}</svg>`;
+        return `<svg width="20" height="20" viewBox="0 0 24 24" fill="white">${PROVIDER_SVGS.music}</svg>`;
       },
       iconBg: 'rgba(123,63,228,0.5)',
       mediaType: 'playlist',
@@ -1756,22 +2106,53 @@ class SoundFlowCard extends HTMLElement {
     `;
   }
 
+  /**
+   * Tenta extrair a melhor URL de imagem de um item da MA library/search.
+   * Estruturas conhecidas:
+   *   - item.image.path           (legacy)
+   *   - item.metadata.images[]    (lista de objetos {type,path,...})
+   *   - item.images[]             (lista direta de objetos {path})
+   */
+  _getItemImage(item) {
+    if (!item) return null;
+    if (item.image && item.image.path) return item.image.path;
+    if (Array.isArray(item.metadata?.images) && item.metadata.images.length > 0) {
+      // Preferir thumb se existir, senão a primeira
+      const thumb = item.metadata.images.find((i) => i.type === 'thumb' || i.type === 'cover');
+      return (thumb && thumb.path) || item.metadata.images[0].path || null;
+    }
+    if (Array.isArray(item.images) && item.images.length > 0) {
+      return item.images[0].path || item.images[0].url || null;
+    }
+    return null;
+  }
+
   _renderSearchItem(item, mediaType) {
     const subtitleParts = [];
     if (item.artists && item.artists.length > 0) subtitleParts.push(item.artists[0].name);
     if (mediaType === 'album' && item.year) subtitleParts.push(item.year);
     const subtitle = subtitleParts.join(' · ');
-    const imgHtml = item.image && item.image.path
-      ? `<img src="${this._esc(item.image.path)}" style="width:100%;height:100%;object-fit:cover;border-radius:8px;">`
-      : `<svg width="14" height="14" viewBox="0 0 24 24" fill="white">${PROVIDER_SVGS.music}</svg>`;
+    const imgUrl = this._getItemImage(item);
+
+    // Para artistas usamos avatar circular, para tracks/álbuns rectangular arredondado
+    const isArtist = mediaType === 'artist';
+    const iconBorderRadius = isArtist ? '50%' : '10px';
+    const iconBg = isArtist ? 'rgba(123,63,228,0.4)' : 'var(--sf-grad)';
+
+    const imgHtml = imgUrl
+      ? `<img src="${this._esc(imgUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:${iconBorderRadius};" onerror="this.style.display='none'">`
+      : (isArtist
+          ? `<svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M12 12a4 4 0 100-8 4 4 0 000 8zm0 2c-3.3 0-10 1.7-10 5v3h20v-3c0-3.3-6.7-5-10-5z"/></svg>`
+          : `<svg width="20" height="20" viewBox="0 0 24 24" fill="white">${PROVIDER_SVGS.music}</svg>`);
+
     return `
       <div class="sf-list-item" data-action="play-item" data-uri="${this._esc(item.uri)}" data-media-type="${this._esc(mediaType)}" data-name="${this._esc(item.name || '')}" style="margin-bottom:6px;">
-        <div class="sf-list-item-icon" style="background:var(--sf-grad);">${imgHtml}</div>
+        <div class="sf-list-item-icon" style="width:48px;height:48px;border-radius:${iconBorderRadius};background:${iconBg};">${imgHtml}</div>
         <div class="sf-list-item-content">
           <div class="sf-list-item-title">${this._esc(item.name || 'Sem nome')}</div>
           ${subtitle ? `<div class="sf-list-item-subtitle">${this._esc(subtitle)}</div>` : ''}
         </div>
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--sf-pink)">${ICONS.shuffle_play}</svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="var(--sf-pink)" style="flex-shrink:0;">${ICONS.shuffle_play}</svg>
       </div>
     `;
   }

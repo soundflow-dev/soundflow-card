@@ -1,5 +1,5 @@
 // soundflow-card.js - Card SoundFlow consolidado
-// Versão: 0.3.0 | Licença: MIT
+// Versão: 0.3.1 | Licença: MIT
 
 import './editor.js';
 import { SOUNDFLOW_STYLES, ICONS } from './styles.js';
@@ -19,7 +19,7 @@ import {
   maGetLibrary,
 } from './ma-api.js';
 
-const CARD_VERSION = '0.3.0';
+const CARD_VERSION = "0.3.1";
 
 console.info(
   `%c SOUNDFLOW-CARD %c ${CARD_VERSION} `,
@@ -231,7 +231,6 @@ class SoundFlowCard extends HTMLElement {
       } else {
         this._selectedSpeakers = [...this._selectedSpeakers, entityId];
       }
-      // Atualizar activePlayer para refletir
       if (this._selectedSpeakers.length > 0) {
         const first = this._players.find((p) => p.entity_id === this._selectedSpeakers[0]);
         if (first) this._activePlayer = first;
@@ -241,13 +240,42 @@ class SoundFlowCard extends HTMLElement {
 
     // CASE A: algo está a tocar
     if (playing.includes(entityId)) {
-      // Esta coluna está a tocar → desagrupar
-      try {
-        await unjoinPlayer(this._hass, entityId);
-      } catch (e) { console.warn('[SoundFlow] unjoin failed:', e); }
+      // Removendo uma coluna do grupo
+      const remaining = playing.filter((id) => id !== entityId);
+      const currentLeader = this._findCurrentLeader(playing);
+
+      if (remaining.length === 0) {
+        // Era a única → simplesmente unjoin
+        try {
+          await unjoinPlayer(this._hass, entityId);
+        } catch (e) { console.warn('[SoundFlow] unjoin failed:', e); }
+        return;
+      }
+
+      if (entityId === currentLeader) {
+        // CASO CRÍTICO: estamos a desselecionar o LEADER.
+        // Fazer unjoin no leader normalmente pára tudo. Em vez disso,
+        // promovemos outro player a leader: chamar join(novo_leader, restantes).
+        // O MA transfere o stream para o novo leader e o antigo sai do grupo.
+        const newLeader = remaining[0];
+        try {
+          await groupPlayers(this._hass, newLeader, remaining);
+          // Atualizar activePlayer para o novo leader (importante para play/pause/next)
+          const leaderObj = this._players.find((p) => p.entity_id === newLeader);
+          if (leaderObj) this._activePlayer = leaderObj;
+        } catch (e) {
+          console.warn('[SoundFlow] Leader transfer failed, falling back to unjoin:', e);
+          // Fallback: tentar unjoin direto (pode parar tudo, mas é melhor que ficar inconsistente)
+          try { await unjoinPlayer(this._hass, entityId); } catch (e2) { /* ignore */ }
+        }
+      } else {
+        // Não é o leader → unjoin normal (o resto continua a tocar)
+        try {
+          await unjoinPlayer(this._hass, entityId);
+        } catch (e) { console.warn('[SoundFlow] unjoin failed:', e); }
+      }
     } else {
       // Adicionar ao grupo: usar o leader atual como base
-      // O leader é quem tem maior group_members (ou o primeiro a tocar se não há grupos)
       const leader = this._findCurrentLeader(playing);
       if (!leader) return;
       const newMembers = [...playing, entityId];
@@ -849,12 +877,9 @@ class SoundFlowCard extends HTMLElement {
     const muteTitle = allMuted ? 'Desmutar' : 'Silenciar';
 
     return `
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
+      <div style="display:flex;justify-content:flex-end;align-items:center;margin-bottom:18px;">
         <button class="sf-icon-btn sf-circle" style="width:48px;height:48px;" data-action="close-modal" title="Fechar">
           <svg width="24" height="24" viewBox="0 0 24 24">${ICONS.close}</svg>
-        </button>
-        <button class="sf-icon-btn sf-circle" style="width:48px;height:48px;" data-action="open-settings" title="Editar configuração">
-          <svg width="28" height="28" viewBox="0 0 24 24">${ICONS.settings}</svg>
         </button>
       </div>
 
@@ -1016,17 +1041,8 @@ class SoundFlowCard extends HTMLElement {
         this._popup = 'source'; this._renderPopup(); break;
       case 'open-speakers':
         this._popup = 'speakers'; this._renderPopup(); break;
-      case 'open-settings': {
-        // Em vez de abrir popup interno, dispara diretamente a edição do card no HA
-        this._closeModal();
-        const ev = new CustomEvent('show-edit-card', { bubbles: true, composed: true });
-        this.dispatchEvent(ev);
-        const fallback = new CustomEvent('hass-edit-mode', { bubbles: true, composed: true });
-        this.dispatchEvent(fallback);
-        break;
-      }
       case 'select-player':
-        // Popup unificado Player + Colunas
+        // Popup unificado Player + Colunas (mantido por defesa, embora sem botão)
         this._popup = 'speakers'; this._renderPopup(); break;
 
       case 'search-submit':
@@ -1145,7 +1161,6 @@ class SoundFlowCard extends HTMLElement {
       case 'source-favorites': return this._renderSourceFavoritesPopup();
       case 'source-favorites-category': return this._renderSourceFavoritesCategoryPopup();
       case 'speakers': return this._renderSpeakersPopup();
-      case 'settings': return this._renderSettingsPopup();
       case 'search-results': return this._renderSearchResultsPopup();
       default: return '';
     }
@@ -1174,31 +1189,6 @@ class SoundFlowCard extends HTMLElement {
     switch (action) {
       case 'close-popup':
         this._popup = null; this._renderPopup(); break;
-
-      case 'reload-providers':
-        this._providers = [];
-        this._renderPopup();
-        try {
-          await this._loadProviders();
-        } catch (e) { /* ignore */ }
-        this._renderPopup();
-        break;
-
-      case 'edit-card': {
-        // Dispara evento HA standard para abrir o editor visual deste card
-        const ev = new CustomEvent('show-edit-card', {
-          bubbles: true,
-          composed: true,
-          detail: { /* card index é resolvido pelo HA via event composition */ },
-        });
-        this.dispatchEvent(ev);
-        // Em alternativa, alguns dashboards respondem a hass-edit-mode:
-        const fallback = new CustomEvent('hass-edit-mode', { bubbles: true, composed: true });
-        this.dispatchEvent(fallback);
-        this._popup = null;
-        this._renderPopup();
-        break;
-      }
 
       case 'select-source-provider': {
         // Pode ser entrada inicial (clicaste num provider) ou back (do popup de categoria)
@@ -1642,93 +1632,6 @@ class SoundFlowCard extends HTMLElement {
     `;
   }
 
-  // ============================================================
-  // SETTINGS POPUP
-  // ============================================================
-
-  _renderSettingsPopup() {
-    return `
-      <div class="sf-popup-header">
-        <span class="sf-popup-title">Definições</span>
-        <button class="sf-icon-btn sf-circle" style="width:36px;height:36px;" data-action="close-popup">
-          <svg width="20" height="20" viewBox="0 0 24 24">${ICONS.close}</svg>
-        </button>
-      </div>
-
-      <div style="display:flex;flex-direction:column;gap:16px;">
-        <div>
-          <div style="font-size:11px;color:var(--sf-text-3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Sobre</div>
-          <div style="display:flex;align-items:center;gap:14px;padding:14px;background:var(--sf-button-bg);border-radius:12px;">
-            <div style="width:48px;height:48px;border-radius:12px;overflow:hidden;flex-shrink:0;">
-              <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;display:block;">
-                <defs>
-                  <linearGradient id="sflogo-set" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stop-color="#EA3572"/>
-                    <stop offset="50%" stop-color="#C729C7"/>
-                    <stop offset="100%" stop-color="#7B3FE4"/>
-                  </linearGradient>
-                </defs>
-                <rect width="100" height="100" rx="22" fill="url(#sflogo-set)"/>
-                <path d="M 22 56 Q 36 36, 50 50 T 78 46" fill="none" stroke="white" stroke-width="4.5" stroke-linecap="round" opacity="0.95"/>
-                <circle cx="22" cy="56" r="4" fill="white"/>
-                <circle cx="78" cy="46" r="4" fill="white"/>
-              </svg>
-            </div>
-            <div>
-              <div style="font-size:15px;font-weight:600;">SoundFlow Card</div>
-              <div style="font-size:12px;color:var(--sf-text-2);">Versão ${CARD_VERSION}</div>
-            </div>
-          </div>
-        </div>
-
-        <div>
-          <div style="font-size:11px;color:var(--sf-text-3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Players visíveis (${this._players.length})</div>
-          <div style="display:flex;flex-direction:column;gap:6px;">
-            ${this._players.map((p) => `
-              <div style="padding:10px 12px;background:var(--sf-button-bg);border:1px solid var(--sf-border);border-radius:10px;font-size:13px;">
-                ${this._esc(this._cleanName(p.friendly_name))}
-                <div style="font-size:11px;color:var(--sf-text-3);">${this._esc(p.entity_id)}</div>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-
-        <div>
-          <div style="font-size:11px;color:var(--sf-text-3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Providers detectados (${this._providers.length})</div>
-          <div style="display:flex;flex-direction:column;gap:6px;">
-            ${this._providers.length === 0
-              ? '<div style="font-size:12px;color:var(--sf-text-3);">Nenhum provider detectado</div>'
-              : this._providers.map((p) => {
-                  const def = getProviderDef(p.domain);
-                  return `
-                    <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--sf-button-bg);border:1px solid var(--sf-border);border-radius:10px;">
-                      <div style="width:24px;height:24px;border-radius:6px;background:${def.gradient};display:flex;align-items:center;justify-content:center;flex-shrink:0;">
-                        ${this._renderProviderIcon(def, 12)}
-                      </div>
-                      <div style="flex:1;min-width:0;">
-                        <div style="font-size:12px;font-weight:500;">${this._esc(p.name || def.name)}</div>
-                        <div style="font-size:10px;color:var(--sf-text-3);">${this._esc(p.domain || '')}</div>
-                      </div>
-                    </div>
-                  `;
-                }).join('')}
-          </div>
-          <button class="sf-equalize" style="width:100%;margin-top:8px;padding:9px;font-size:11px;border-radius:10px;background:var(--sf-button-bg);color:var(--sf-text);border:1px dashed var(--sf-border);" data-action="reload-providers">
-            🔄 Re-detetar providers
-          </button>
-        </div>
-
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px;">
-          <button class="sf-equalize" style="padding:11px;font-size:12px;border-radius:10px;" data-action="edit-card">
-            Editar configuração
-          </button>
-          <a href="https://github.com/soundflow-dev/soundflow-card" target="_blank" rel="noopener" style="text-decoration:none;display:flex;align-items:center;justify-content:center;padding:11px;font-size:12px;border-radius:10px;background:var(--sf-button-bg);border:1px solid var(--sf-border);color:var(--sf-text);font-weight:500;">
-            GitHub ↗
-          </a>
-        </div>
-      </div>
-    `;
-  }
 
   // ============================================================
   // RADIOS / FAVORITES / PLAYLISTS POPUPS

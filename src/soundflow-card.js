@@ -1,5 +1,5 @@
 // soundflow-card.js - Card SoundFlow consolidado
-// Versão: 0.2.0 | Licença: MIT
+// Versão: 0.3.0 | Licença: MIT
 
 import './editor.js';
 import { SOUNDFLOW_STYLES, ICONS } from './styles.js';
@@ -19,7 +19,7 @@ import {
   maGetLibrary,
 } from './ma-api.js';
 
-const CARD_VERSION = '0.2.0';
+const CARD_VERSION = '0.3.0';
 
 console.info(
   `%c SOUNDFLOW-CARD %c ${CARD_VERSION} `,
@@ -162,15 +162,39 @@ class SoundFlowCard extends HTMLElement {
     return `${m}:${s.toString().padStart(2, '0')}`;
   }
 
-  _getEffectiveSpeakers() {
-    if (this._selectedSpeakers.length === 0 && this._activePlayer) {
-      return [this._activePlayer.entity_id];
-    }
+  /**
+   * Devolve os entity_ids dos players que estão atualmente a tocar ou em pausa.
+   * Esta é a "verdade" — vem direto do HA e sincroniza entre dispositivos.
+   */
+  _getPlayingPlayers() {
+    if (!this._hass) return [];
+    return this._players
+      .filter((p) => p.state === 'playing' || p.state === 'paused')
+      .map((p) => p.entity_id);
+  }
+
+  /**
+   * O que aparece "selecionado" no popup de colunas:
+   * - Se há colunas a tocar: essas são as selecionadas (override do HA, sincroniza)
+   * - Se nada está a tocar: usa a seleção temporária `_selectedSpeakers` (memória local)
+   */
+  _getActiveSelection() {
+    const playing = this._getPlayingPlayers();
+    if (playing.length > 0) return playing;
     return this._selectedSpeakers;
   }
 
+  _getEffectiveSpeakers() {
+    // Para volume/mute/play: prioriza o que está a tocar; senão seleção; senão active player
+    const playing = this._getPlayingPlayers();
+    if (playing.length > 0) return playing;
+    if (this._selectedSpeakers.length > 0) return this._selectedSpeakers;
+    if (this._activePlayer) return [this._activePlayer.entity_id];
+    return [];
+  }
+
   _getSpeakerLabel() {
-    const ids = this._getEffectiveSpeakers();
+    const ids = this._getActiveSelection();
     if (ids.length === 0) return 'Nenhuma';
     if (ids.length === this._players.length && ids.length > 1) return 'Toda a casa';
     return ids
@@ -189,29 +213,113 @@ class SoundFlowCard extends HTMLElement {
     );
   }
 
-  _toggleSpeaker(entityId) {
-    if (this._selectedSpeakers.includes(entityId)) {
-      this._selectedSpeakers = this._selectedSpeakers.filter((id) => id !== entityId);
+  /**
+   * Toggle de uma coluna. Comportamento depende do estado atual:
+   *   A) Se há algo a tocar:
+   *      - Coluna está no grupo de play → unjoin (pára nessa coluna)
+   *      - Coluna não está → join ao grupo atual (adiciona)
+   *   B) Se nada está a tocar:
+   *      - Apenas atualiza a seleção temporária (memória local)
+   */
+  async _toggleSpeaker(entityId) {
+    const playing = this._getPlayingPlayers();
+
+    if (playing.length === 0) {
+      // CASE B: ninguém toca → memória local
+      if (this._selectedSpeakers.includes(entityId)) {
+        this._selectedSpeakers = this._selectedSpeakers.filter((id) => id !== entityId);
+      } else {
+        this._selectedSpeakers = [...this._selectedSpeakers, entityId];
+      }
+      // Atualizar activePlayer para refletir
+      if (this._selectedSpeakers.length > 0) {
+        const first = this._players.find((p) => p.entity_id === this._selectedSpeakers[0]);
+        if (first) this._activePlayer = first;
+      }
+      return;
+    }
+
+    // CASE A: algo está a tocar
+    if (playing.includes(entityId)) {
+      // Esta coluna está a tocar → desagrupar
+      try {
+        await unjoinPlayer(this._hass, entityId);
+      } catch (e) { console.warn('[SoundFlow] unjoin failed:', e); }
     } else {
-      this._selectedSpeakers = [...this._selectedSpeakers, entityId];
+      // Adicionar ao grupo: usar o leader atual como base
+      // O leader é quem tem maior group_members (ou o primeiro a tocar se não há grupos)
+      const leader = this._findCurrentLeader(playing);
+      if (!leader) return;
+      const newMembers = [...playing, entityId];
+      try {
+        await groupPlayers(this._hass, leader, newMembers);
+      } catch (e) { console.warn('[SoundFlow] join failed:', e); }
     }
   }
 
-  _selectAllSpeakers() {
-    if (this._selectedSpeakers.length === this._players.length) {
-      this._selectedSpeakers = [];
+  /**
+   * Encontra o leader atual de um conjunto de players a tocar.
+   * Leader é o player que tem outros como group_members.
+   */
+  _findCurrentLeader(playingIds) {
+    if (!this._hass || playingIds.length === 0) return null;
+    if (playingIds.length === 1) return playingIds[0];
+    // Procurar o player com group_members.length > 1
+    for (const id of playingIds) {
+      const s = this._hass.states[id];
+      const members = s && s.attributes.group_members;
+      if (Array.isArray(members) && members.length > 1) return id;
+    }
+    return playingIds[0];
+  }
+
+  async _selectAllSpeakers() {
+    const playing = this._getPlayingPlayers();
+    const allIds = this._players.map((p) => p.entity_id);
+
+    if (playing.length === 0) {
+      // CASE B: memória local — toggle entre todas/nenhuma
+      if (this._selectedSpeakers.length === this._players.length) {
+        this._selectedSpeakers = [];
+      } else {
+        this._selectedSpeakers = allIds;
+        if (allIds.length > 0) {
+          const first = this._players.find((p) => p.entity_id === allIds[0]);
+          if (first) this._activePlayer = first;
+        }
+      }
+      return;
+    }
+
+    // CASE A: algo toca
+    const allPlaying = playing.length === this._players.length;
+    if (allPlaying) {
+      // Toda a casa toca → desagrupar tudo
+      const tasks = [];
+      for (const id of playing) {
+        const s = this._hass.states[id];
+        const members = s && s.attributes.group_members;
+        if (Array.isArray(members) && members.length > 1) {
+          tasks.push(unjoinPlayer(this._hass, id).catch(() => {}));
+        }
+      }
+      if (tasks.length > 0) await Promise.all(tasks);
     } else {
-      this._selectedSpeakers = this._players.map((p) => p.entity_id);
+      // Adicionar todos ao grupo do leader atual
+      const leader = this._findCurrentLeader(playing);
+      if (!leader) return;
+      try {
+        await groupPlayers(this._hass, leader, allIds);
+      } catch (e) { console.warn('[SoundFlow] group all failed:', e); }
     }
   }
 
   /**
    * Calcula dinamicamente qual o leader implícito da seleção atual.
-   * Heurística:
+   * Heurística previsível:
    *   1. Se algum dos selecionados está a tocar, esse é o leader
-   *   2. Senão, o que tem volume_level mais alto (provavelmente o "principal" físico)
-   *   3. Fallback: o primeiro selecionado
-   * Retorna null se a seleção estiver vazia.
+   *   2. Senão, se o _activePlayer está nos selecionados, é ele
+   *   3. Fallback: o primeiro da seleção
    */
   _getImplicitLeader() {
     const ids = this._selectedSpeakers.length > 0
@@ -225,15 +333,12 @@ class SoundFlowCard extends HTMLElement {
       const s = this._hass.states[id];
       if (s && s.state === 'playing') return id;
     }
-    // 2. Volume mais alto
-    let best = ids[0];
-    let bestVol = -1;
-    for (const id of ids) {
-      const s = this._hass.states[id];
-      const vol = s ? (s.attributes.volume_level || 0) : 0;
-      if (vol > bestVol) { bestVol = vol; best = id; }
+    // 2. _activePlayer presente na seleção?
+    if (this._activePlayer && ids.includes(this._activePlayer.entity_id)) {
+      return this._activePlayer.entity_id;
     }
-    return best;
+    // 3. Primeiro
+    return ids[0];
   }
 
   /**
@@ -745,12 +850,10 @@ class SoundFlowCard extends HTMLElement {
 
     return `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
-        <button class="sf-pill" data-action="select-player" title="Mudar player">
-          <span class="sf-dot"></span>
-          <span>${this._esc(playerName)}</span>
-          <svg width="13" height="13" viewBox="0 0 24 24">${ICONS.chevron_down}</svg>
+        <button class="sf-icon-btn sf-circle" style="width:48px;height:48px;" data-action="close-modal" title="Fechar">
+          <svg width="24" height="24" viewBox="0 0 24 24">${ICONS.close}</svg>
         </button>
-        <button class="sf-icon-btn sf-circle" style="width:48px;height:48px;" data-action="open-settings" title="Definições">
+        <button class="sf-icon-btn sf-circle" style="width:48px;height:48px;" data-action="open-settings" title="Editar configuração">
           <svg width="28" height="28" viewBox="0 0 24 24">${ICONS.settings}</svg>
         </button>
       </div>
@@ -913,8 +1016,15 @@ class SoundFlowCard extends HTMLElement {
         this._popup = 'source'; this._renderPopup(); break;
       case 'open-speakers':
         this._popup = 'speakers'; this._renderPopup(); break;
-      case 'open-settings':
-        this._popup = 'settings'; this._renderPopup(); break;
+      case 'open-settings': {
+        // Em vez de abrir popup interno, dispara diretamente a edição do card no HA
+        this._closeModal();
+        const ev = new CustomEvent('show-edit-card', { bubbles: true, composed: true });
+        this.dispatchEvent(ev);
+        const fallback = new CustomEvent('hass-edit-mode', { bubbles: true, composed: true });
+        this.dispatchEvent(fallback);
+        break;
+      }
       case 'select-player':
         // Popup unificado Player + Colunas
         this._popup = 'speakers'; this._renderPopup(); break;
@@ -1163,17 +1273,15 @@ class SoundFlowCard extends HTMLElement {
       }
 
       case 'toggle-speaker':
-        this._toggleSpeaker(element.dataset.entityId);
+        // Toggle agora é async e faz join/unjoin imediato em background
+        await this._toggleSpeaker(element.dataset.entityId);
         this._renderPopup();
         this._renderModal();
-        // Auto-grouping em background — não bloqueia a UI
-        this._syncGrouping();
         break;
       case 'select-all-speakers':
-        this._selectAllSpeakers();
+        await this._selectAllSpeakers();
         this._renderPopup();
         this._renderModal();
-        this._syncGrouping();
         break;
       case 'speaker-vol-up':
         await adjustVolume(this._hass, [element.dataset.entityId], 0.05);
@@ -1405,9 +1513,14 @@ class SoundFlowCard extends HTMLElement {
 
   _renderSpeakersPopup() {
     const total = this._players.length;
-    const selected = this._selectedSpeakers.length;
+    const activeSel = this._getActiveSelection();
+    const playing = this._getPlayingPlayers();
+    const isPlaying = playing.length > 0;
+    const selected = activeSel.length;
     const allSelected = selected === total && total > 0;
-    const allLabel = allSelected ? '✓ Toda a casa selecionada' : 'Selecionar toda a casa';
+    const allLabel = allSelected
+      ? (isPlaying ? '✓ Toda a casa a tocar' : '✓ Toda a casa selecionada')
+      : (isPlaying ? 'Adicionar toda a casa' : 'Selecionar toda a casa');
 
     // Detetar o estado de agrupamento real do HA + identificar o leader implícito
     const groupedIds = new Set();
@@ -1419,19 +1532,33 @@ class SoundFlowCard extends HTMLElement {
         members.forEach((m) => groupedIds.add(m));
       }
     }
-    const implicitLeader = this._getImplicitLeader();
+    const implicitLeader = isPlaying
+      ? this._findCurrentLeader(playing)
+      : this._getImplicitLeader();
 
-    // Subtitle: descrever o que está selecionado
+    // Subtitle: descrever o estado real
     let subtitle;
     if (selected === 0) {
       subtitle = 'Toque numa coluna para a selecionar';
-    } else if (selected === 1) {
-      const p = this._players.find((x) => x.entity_id === this._selectedSpeakers[0]);
-      subtitle = p ? `A tocar em ${this._cleanName(p.friendly_name)}` : '';
-    } else if (selected === total) {
-      subtitle = 'A tocar em toda a casa · sincronizado';
+    } else if (isPlaying) {
+      if (selected === 1) {
+        const p = this._players.find((x) => x.entity_id === activeSel[0]);
+        subtitle = p ? `A tocar em ${this._cleanName(p.friendly_name)}` : '';
+      } else if (selected === total) {
+        subtitle = 'A tocar em toda a casa · sincronizado';
+      } else {
+        subtitle = `A tocar em ${selected} colunas · sincronizado`;
+      }
     } else {
-      subtitle = `A tocar em ${selected} colunas · sincronizado`;
+      // selecionado mas nada toca ainda
+      if (selected === 1) {
+        const p = this._players.find((x) => x.entity_id === activeSel[0]);
+        subtitle = p ? `Próxima música → ${this._cleanName(p.friendly_name)}` : '';
+      } else if (selected === total) {
+        subtitle = 'Próxima música → toda a casa';
+      } else {
+        subtitle = `Próxima música → ${selected} colunas`;
+      }
     }
 
     return `
@@ -1451,7 +1578,7 @@ class SoundFlowCard extends HTMLElement {
       </button>
 
       <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px;">
-        ${this._players.map((p) => this._renderSpeakerRow(p, groupedIds, implicitLeader)).join('')}
+        ${this._players.map((p) => this._renderSpeakerRow(p, groupedIds, implicitLeader, activeSel)).join('')}
       </div>
 
       <button class="sf-equalize" style="width:100%;padding:11px;font-size:12px;border-radius:10px;" data-action="equalize-popup">
@@ -1460,13 +1587,14 @@ class SoundFlowCard extends HTMLElement {
     `;
   }
 
-  _renderSpeakerRow(player, groupedIds = new Set(), implicitLeader = null) {
-    const isSelected = this._selectedSpeakers.includes(player.entity_id);
+  _renderSpeakerRow(player, groupedIds = new Set(), implicitLeader = null, activeSel = null) {
+    const sel = activeSel || this._getActiveSelection();
+    const isSelected = sel.includes(player.entity_id);
     const stateObj = this._hass.states[player.entity_id];
     const volPct = stateObj ? Math.round((stateObj.attributes.volume_level || 0) * 100) : 0;
     const name = this._cleanName(player.friendly_name);
     const isGrouped = groupedIds.has(player.entity_id);
-    const isLeader = isSelected && this._selectedSpeakers.length > 1 && player.entity_id === implicitLeader;
+    const isLeader = isSelected && sel.length > 1 && player.entity_id === implicitLeader;
 
     const stateLabel = player.state === 'playing' ? 'A tocar'
       : player.state === 'paused' ? 'Em pausa'
@@ -1943,8 +2071,9 @@ class SoundFlowCard extends HTMLElement {
   // ============================================================
 
   async _playProviderTracks(ctx) {
-    const player = this._activePlayer;
+    const player = this._getPlayTarget();
     if (!player) return;
+    this._activePlayer = player;
 
     try {
       await this._hass.callService('media_player', 'shuffle_set', { shuffle: true }, { entity_id: player.entity_id });
@@ -1976,9 +2105,28 @@ class SoundFlowCard extends HTMLElement {
     await this._maybeGroupSpeakers();
   }
 
+  /**
+   * Decide o player onde a próxima música deve começar a tocar.
+   * - Se há _selectedSpeakers (memória local): usa o primeiro como leader
+   *   (e os outros serão agrupados por _maybeGroupSpeakers depois do play)
+   * - Senão: usa o _activePlayer
+   * - Senão: nada
+   */
+  _getPlayTarget() {
+    if (this._selectedSpeakers.length > 0) {
+      const id = this._selectedSpeakers[0];
+      const found = this._players.find((p) => p.entity_id === id);
+      if (found) return found;
+    }
+    return this._activePlayer;
+  }
+
   async _playSelectedItem(uri, mediaType, name) {
-    const player = this._activePlayer;
+    const player = this._getPlayTarget();
     if (!player) return;
+
+    // Atualiza activePlayer para o leader
+    this._activePlayer = player;
 
     this._selectedSource = {
       kind: mediaType === 'radio' ? 'radio-station' : 'item',
@@ -2000,12 +2148,21 @@ class SoundFlowCard extends HTMLElement {
   }
 
   async _maybeGroupSpeakers() {
+    // Se há seleção temporária (memória local), aplica-a antes do play.
+    // Caso contrário, deixa tocar onde já estava (no _activePlayer).
     const ids = this._selectedSpeakers;
     if (ids.length < 2) return;
-    const leader = this._activePlayer ? this._activePlayer.entity_id : ids[0];
-    if (!ids.includes(leader)) return;
+
+    // O leader da seleção é o activePlayer se estiver na seleção, senão o primeiro
+    const leader = this._activePlayer && ids.includes(this._activePlayer.entity_id)
+      ? this._activePlayer.entity_id
+      : ids[0];
+
     try {
       await groupPlayers(this._hass, leader, ids);
+      // Garante que o activePlayer reflete o leader (importante para subsequent commands)
+      const leaderObj = this._players.find((p) => p.entity_id === leader);
+      if (leaderObj) this._activePlayer = leaderObj;
     } catch (e) {
       console.warn('[SoundFlow] Group speakers failed:', e);
     }

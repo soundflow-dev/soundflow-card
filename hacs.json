@@ -1,0 +1,6 @@
+{
+  "name": "SoundFlow Card",
+  "render_readme": true,
+  "filename": "soundflow-card.js",
+  "homeassistant": "2024.1.0"
+}

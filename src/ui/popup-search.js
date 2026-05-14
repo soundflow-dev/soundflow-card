@@ -35,12 +35,21 @@ export function renderSearchResults(card, container, results) {
   container.querySelector('[data-act="close"]').addEventListener('click', () => card._closeAllPopups());
   container.querySelector('[data-act="back"]').addEventListener('click', () => card._renderModal());
 
+  // Drill-down vs play directo:
+  //  - tracks/radios → click = tocar imediato
+  //  - albums/artists/playlists → click = abrir details (escolher track ou Play all)
+  const DRILLDOWN = new Set(['albums', 'artists', 'playlists']);
   for (const s of sections) {
     const sec = container.querySelector(`[data-sec="${s.key}"]`);
     if (!sec) continue;
     const items = results[s.key] || [];
     [...sec.querySelectorAll('.sf-list-item')].forEach((node, idx) => {
-      node.addEventListener('click', () => card._playMediaItem(items[idx], { mediaType: s.key.slice(0, -1) }));
+      const it = items[idx];
+      const mediaType = s.key.slice(0, -1); // tracks → track
+      node.addEventListener('click', () => {
+        if (DRILLDOWN.has(s.key) && it?.uri) card._openMediaDetails(it, mediaType);
+        else card._playMediaItem(it, { mediaType });
+      });
     });
   }
 }
@@ -49,6 +58,9 @@ function searchItemHtml(it, kind) {
   const img = it?.image || it?.metadata?.image || it?.images?.[0]?.path;
   const title = it.name || it.title || it.uri || '';
   const sub = it.artist || it.artists?.[0]?.name || it.album?.name || it.subtitle || '';
+  // Chevron para drill-down (album/artist/playlist), play para action imediato (track/radio)
+  const isDrill = kind === 'albums' || kind === 'artists' || kind === 'playlists';
+  const chev = isDrill ? 'chev' : 'play';
   return `
     <button class="sf-list-item">
       <div class="sf-li-icon" style="${img ? `background-image:url(${JSON.stringify(img).slice(1, -1)});` : ''}">${img ? '' : providerSvg(it.provider || 'builtin', 30)}</div>
@@ -56,7 +68,7 @@ function searchItemHtml(it, kind) {
         <div class="sf-li-title">${escapeHtml(title)}</div>
         ${sub ? `<div class="sf-li-sub">${escapeHtml(sub)}</div>` : ''}
       </div>
-      <div class="sf-li-chev">${svgIcon('play', 18)}</div>
+      <div class="sf-li-chev">${svgIcon(chev, 18)}</div>
     </button>`;
 }
 

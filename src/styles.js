@@ -221,6 +221,28 @@ button:focus-visible { outline: 2px solid #C729C7; outline-offset: 2px; border-r
 .sf-empty { text-align: center; color: var(--sf-text-dim); padding: 28px 12px; font-size: 14px; }
 .sf-loading { text-align: center; color: var(--sf-text-dim); padding: 28px 12px; font-size: 14px; }
 
+/* details popup (drill-down de álbum/artista/playlist) */
+.sf-detail-head { display: flex; gap: 14px; padding: 8px 4px 14px; }
+.sf-detail-art {
+  width: 96px; height: 96px; border-radius: 12px; background: var(--sf-track) center/cover no-repeat;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.sf-detail-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
+.sf-detail-title { font-size: 16px; font-weight: 700; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.sf-detail-sub { font-size: 13px; color: var(--sf-text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-btn-primary {
+  display: inline-flex; align-items: center; gap: 6px; align-self: flex-start;
+  background: ${SF_GRADIENT}; color: white; border: 0; border-radius: 18px;
+  padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer; margin-top: 4px;
+}
+.sf-btn-primary:hover { filter: brightness(1.05); }
+.sf-btn-primary:active { transform: scale(0.97); }
+.sf-btn-primary svg { fill: white; }
+.sf-li-idx {
+  font-size: 13px; color: var(--sf-text-dim); font-variant-numeric: tabular-nums;
+  display: inline-flex; align-items: center; justify-content: center; width: 100%; height: 100%;
+}
+
 /* shimmer / spinner */
 .sf-spinner { width: 18px; height: 18px; border: 2px solid var(--sf-track); border-top-color: #C729C7; border-radius: 50%; animation: sfSpin .8s linear infinite; display: inline-block; vertical-align: middle; }
 @keyframes sfSpin { to { transform: rotate(360deg); } }

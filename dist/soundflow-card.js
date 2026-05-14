@@ -224,6 +224,28 @@ button:focus-visible { outline: 2px solid #C729C7; outline-offset: 2px; border-r
 .sf-empty { text-align: center; color: var(--sf-text-dim); padding: 28px 12px; font-size: 14px; }
 .sf-loading { text-align: center; color: var(--sf-text-dim); padding: 28px 12px; font-size: 14px; }
 
+/* details popup (drill-down de álbum/artista/playlist) */
+.sf-detail-head { display: flex; gap: 14px; padding: 8px 4px 14px; }
+.sf-detail-art {
+  width: 96px; height: 96px; border-radius: 12px; background: var(--sf-track) center/cover no-repeat;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.sf-detail-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
+.sf-detail-title { font-size: 16px; font-weight: 700; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.sf-detail-sub { font-size: 13px; color: var(--sf-text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-btn-primary {
+  display: inline-flex; align-items: center; gap: 6px; align-self: flex-start;
+  background: ${SF_GRADIENT}; color: white; border: 0; border-radius: 18px;
+  padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer; margin-top: 4px;
+}
+.sf-btn-primary:hover { filter: brightness(1.05); }
+.sf-btn-primary:active { transform: scale(0.97); }
+.sf-btn-primary svg { fill: white; }
+.sf-li-idx {
+  font-size: 13px; color: var(--sf-text-dim); font-variant-numeric: tabular-nums;
+  display: inline-flex; align-items: center; justify-content: center; width: 100%; height: 100%;
+}
+
 /* shimmer / spinner */
 .sf-spinner { width: 18px; height: 18px; border: 2px solid var(--sf-track); border-top-color: #C729C7; border-radius: 50%; animation: sfSpin .8s linear infinite; display: inline-block; vertical-align: middle; }
 @keyframes sfSpin { to { transform: rotate(360deg); } }
@@ -358,7 +380,14 @@ const STRINGS = {
     volume_equalized: 'Volume igualado a {n}%',
     pending_pick_speakers: 'Selecciona uma coluna primeiro',
     pending_set: 'Pronto: carrega ▶ para tocar',
-    pending_clear: 'Pendente cancelado'
+    pending_clear: 'Pendente cancelado',
+    play_all: 'Tocar tudo',
+    play_album: 'Tocar álbum',
+    play_artist: 'Tocar tudo do artista',
+    play_all_shuffle: 'Tocar tudo (aleatório)',
+    album: 'Álbum',
+    artist: 'Artista',
+    playlist: 'Playlist'
   },
   en: {
     card_name: 'SoundFlow Card',
@@ -427,7 +456,14 @@ const STRINGS = {
     volume_equalized: 'Volume set to {n}%',
     pending_pick_speakers: 'Pick a speaker first',
     pending_set: 'Ready: tap ▶ to play',
-    pending_clear: 'Pending cleared'
+    pending_clear: 'Pending cleared',
+    play_all: 'Play all',
+    play_album: 'Play album',
+    play_artist: 'Play all by artist',
+    play_all_shuffle: 'Play all (shuffle)',
+    album: 'Album',
+    artist: 'Artist',
+    playlist: 'Playlist'
   }
 };
 function getLang(hass) {
@@ -626,6 +662,29 @@ async function getMusicProviders(hass) {
   _cachedMusicProviders = music;
   _cachedMusicProvidersTs = Date.now();
   return music;
+}
+
+// Drill-down: tracks dum álbum / artista / playlist.
+// `kind` ∈ {album, artist, playlist}. Devolve array normalizado de tracks com
+// shape { uri, name, artist, album, image, duration, favorite } — pronto para UI.
+async function getItemTracks(hass, kind, uri, page = 0) {
+  const SERVICE = { album: 'get_album_tracks', artist: 'get_artist_tracks', playlist: 'get_playlist_tracks' }[kind];
+  if (!SERVICE) return [];
+  const entryId = await getMassQueueEntryId(hass);
+  if (!entryId) return [];
+  const data = { config_entry_id: entryId, uri, page };
+  const r = await callServiceWithResponse(hass, 'mass_queue', SERVICE, data);
+  const items = r?.tracks ?? r?.items ?? [];
+  if (!Array.isArray(items)) return [];
+  return items.map(it => ({
+    uri: it.media_content_id || it.uri,
+    name: it.media_title || it.name || it.title,
+    artist: it.media_artist || it.artist || it.artists?.[0]?.name || '',
+    album: it.media_album_name || it.album?.name || '',
+    image: it.media_image || it.image || it.metadata?.images?.[0]?.path,
+    duration: it.duration,
+    favorite: !!it.favorite
+  })).filter(t => t.uri);
 }
 
 // Lista tracks da biblioteca filtradas por provider (apple_music--XXX, builtin, etc.).
@@ -1239,14 +1298,20 @@ function mediaItem(card, it, opts = {}) {
   const img = it?.image || it?.thumbnail || it?.metadata?.image;
   const title = it.name || it.title || it.uri || '';
   const sub = it.artists?.[0]?.name || it.artist || it.album?.name || '';
+  // album/artist/playlist → drill-down (chevron); track/radio → action directo (play)
+  const isDrill = opts.mediaType === 'album' || opts.mediaType === 'artist' || opts.mediaType === 'playlist';
+  const chev = isDrill ? 'chev' : 'play';
   div.innerHTML = `
     <div class="sf-li-icon" style="${img ? `background-image:url(${JSON.stringify(img).slice(1, -1)});` : ''}">${img ? '' : providerSvg('builtin', 30)}</div>
     <div class="sf-li-body">
       <div class="sf-li-title">${escapeHtml(title)}</div>
       ${sub ? `<div class="sf-li-sub">${escapeHtml(sub)}</div>` : ''}
     </div>
-    <div class="sf-li-chev">${svgIcon('play', 18)}</div>`;
-  div.addEventListener('click', () => card._playMediaItem(it, opts));
+    <div class="sf-li-chev">${svgIcon(chev, 18)}</div>`;
+  div.addEventListener('click', () => {
+    if (isDrill && it?.uri) card._openMediaDetails(it, opts.mediaType);
+    else card._playMediaItem(it, opts);
+  });
   return div;
 }
 
@@ -1286,12 +1351,21 @@ function renderSearchResults(card, container, results) {
   container.querySelector('[data-act="close"]').addEventListener('click', () => card._closeAllPopups());
   container.querySelector('[data-act="back"]').addEventListener('click', () => card._renderModal());
 
+  // Drill-down vs play directo:
+  //  - tracks/radios → click = tocar imediato
+  //  - albums/artists/playlists → click = abrir details (escolher track ou Play all)
+  const DRILLDOWN = new Set(['albums', 'artists', 'playlists']);
   for (const s of sections) {
     const sec = container.querySelector(`[data-sec="${s.key}"]`);
     if (!sec) continue;
     const items = results[s.key] || [];
     [...sec.querySelectorAll('.sf-list-item')].forEach((node, idx) => {
-      node.addEventListener('click', () => card._playMediaItem(items[idx], { mediaType: s.key.slice(0, -1) }));
+      const it = items[idx];
+      const mediaType = s.key.slice(0, -1); // tracks → track
+      node.addEventListener('click', () => {
+        if (DRILLDOWN.has(s.key) && it?.uri) card._openMediaDetails(it, mediaType);
+        else card._playMediaItem(it, { mediaType });
+      });
     });
   }
 }
@@ -1300,6 +1374,9 @@ function searchItemHtml(it, kind) {
   const img = it?.image || it?.metadata?.image || it?.images?.[0]?.path;
   const title = it.name || it.title || it.uri || '';
   const sub = it.artist || it.artists?.[0]?.name || it.album?.name || it.subtitle || '';
+  // Chevron para drill-down (album/artist/playlist), play para action imediato (track/radio)
+  const isDrill = kind === 'albums' || kind === 'artists' || kind === 'playlists';
+  const chev = isDrill ? 'chev' : 'play';
   return `
     <button class="sf-list-item">
       <div class="sf-li-icon" style="${img ? `background-image:url(${JSON.stringify(img).slice(1, -1)});` : ''}">${img ? '' : providerSvg(it.provider || 'builtin', 30)}</div>
@@ -1307,8 +1384,89 @@ function searchItemHtml(it, kind) {
         <div class="sf-li-title">${escapeHtml(title)}</div>
         ${sub ? `<div class="sf-li-sub">${escapeHtml(sub)}</div>` : ''}
       </div>
-      <div class="sf-li-chev">${svgIcon('play', 18)}</div>
+      <div class="sf-li-chev">${svgIcon(chev, 18)}</div>
     </button>`;
+}
+
+function escapeHtml(s) { return String(s ?? '').replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c])); }
+
+/* === src/ui/popup-details.js === */
+// Drill-down popup: mostra header dum álbum/artista/playlist + lista das suas tracks.
+// `card._detailsView` = { kind: 'album'|'artist'|'playlist', item: {...} }
+async function renderDetailsPopup(card, container) {
+  const v = card._detailsView;
+  if (!v || !v.item) { container.innerHTML = ''; return; }
+  const hass = card._hass;
+  const { kind, item } = v;
+  const title = item.name || item.title || item.uri || '';
+  const sub = item.artists?.[0]?.name || item.artist || subForKind(kind, hass);
+  const img = item.image || item.metadata?.image || item.images?.[0]?.path || item.metadata?.images?.[0]?.path;
+  const playAllLabel = playAllLabelForKind(hass, kind);
+
+  container.innerHTML = `
+    <div class="sf-modal-header sf-with-back">
+      <button class="sf-circle-btn" data-act="back">${svgIcon('back', 18)}</button>
+      <h2>${escapeHtml(title)}</h2>
+      <button class="sf-circle-btn" data-act="close">${svgIcon('close', 18)}</button>
+    </div>
+    <div class="sf-detail-head">
+      <div class="sf-detail-art" style="${img ? `background-image:url(${JSON.stringify(img).slice(1, -1)});` : ''}">${img ? '' : providerSvg('builtin', 64)}</div>
+      <div class="sf-detail-meta">
+        <div class="sf-detail-title">${escapeHtml(title)}</div>
+        ${sub ? `<div class="sf-detail-sub">${escapeHtml(sub)}</div>` : ''}
+        <button class="sf-btn-primary" data-act="play-all">
+          ${svgIcon('play', 16)} <span>${escapeHtml(playAllLabel)}</span>
+        </button>
+      </div>
+    </div>
+    <div id="sf-detail-tracks"><div class="sf-loading">${t(hass, 'loading')} <span class="sf-spinner"></span></div></div>
+  `;
+
+  container.querySelector('[data-act="close"]').addEventListener('click', () => card._closeAllPopups());
+  container.querySelector('[data-act="back"]').addEventListener('click', () => card._closeDetailsPopup());
+  container.querySelector('[data-act="play-all"]').addEventListener('click', () => {
+    card._playMediaItem(item, { mediaType: kind, shuffleHint: kind === 'playlist' });
+  });
+
+  // Tracks
+  const tracks = await getItemTracks(hass, kind, item.uri);
+  const list = container.querySelector('#sf-detail-tracks');
+  if (!tracks.length) {
+    list.innerHTML = `<div class="sf-empty">${t(hass, 'no_items')}</div>`;
+    return;
+  }
+  list.innerHTML = `<div class="sf-list"></div>`;
+  const ul = list.querySelector('.sf-list');
+  tracks.forEach((tr, idx) => {
+    const row = document.createElement('button');
+    row.className = 'sf-list-item';
+    row.innerHTML = `
+      <div class="sf-li-icon" style="${tr.image ? `background-image:url(${JSON.stringify(tr.image).slice(1, -1)});` : ''}">${tr.image ? '' : `<span class="sf-li-idx">${idx + 1}</span>`}</div>
+      <div class="sf-li-body">
+        <div class="sf-li-title">${escapeHtml(tr.name || '')}</div>
+        ${(tr.artist || tr.album) ? `<div class="sf-li-sub">${escapeHtml([tr.artist, kind !== 'album' ? tr.album : ''].filter(Boolean).join(' · '))}</div>` : ''}
+      </div>
+      <div class="sf-li-chev">${svgIcon('play', 18)}</div>`;
+    row.addEventListener('click', () => {
+      card._playMediaItem({ uri: tr.uri, name: tr.name, artist: tr.artist }, { mediaType: 'track' });
+    });
+    ul.appendChild(row);
+  });
+}
+
+function subForKind(kind, hass) {
+  return ({
+    album: t(hass, 'album') || 'Album',
+    artist: t(hass, 'artist') || 'Artist',
+    playlist: t(hass, 'playlist') || 'Playlist'
+  })[kind] || '';
+}
+
+function playAllLabelForKind(hass, kind) {
+  if (kind === 'playlist') return t(hass, 'play_all_shuffle') || 'Play all (shuffle)';
+  if (kind === 'album') return t(hass, 'play_album') || 'Play album';
+  if (kind === 'artist') return t(hass, 'play_artist') || 'Play all by artist';
+  return t(hass, 'play_all') || 'Play all';
 }
 
 function escapeHtml(s) { return String(s ?? '').replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -1326,7 +1484,8 @@ class SoundFlowCard extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
     this._modalOpen = false;
-    this._popupOpen = null; // 'source' | 'speakers' | 'search' | null
+    this._popupOpen = null; // 'source' | 'speakers' | 'search' | 'details' | null
+    this._detailsView = null; // { kind: 'album'|'artist'|'playlist', item, returnTo: 'search'|'source' }
     this._selectedSpeakers = []; // memória local (preparação)
     this._lastLeader = null;
     this._sourceView = null;
@@ -1596,7 +1755,7 @@ class SoundFlowCard extends HTMLElement {
     if (m) m.remove();
   }
   _closeAllPopups() {
-    if (this._popupOpen) { this._popupOpen = null; this._sourceView = null; this._renderModal(); }
+    if (this._popupOpen) { this._popupOpen = null; this._sourceView = null; this._detailsView = null; this._renderModal(); }
     else this._closeModal();
   }
   _popupHost() {
@@ -1772,6 +1931,19 @@ class SoundFlowCard extends HTMLElement {
     if (this._popupOpen === 'speakers') renderSpeakersPopup(this, host);
     else if (this._popupOpen === 'source') renderSourcePopup(this, host);
     else if (this._popupOpen === 'search') renderSearchResults(this, host, this._searchResults || { _query: this._searchQuery });
+    else if (this._popupOpen === 'details') renderDetailsPopup(this, host);
+  }
+  _openMediaDetails(item, kind) {
+    if (!item || !['album', 'artist', 'playlist'].includes(kind)) return;
+    this._detailsView = { kind, item, returnTo: this._popupOpen || 'search' };
+    this._popupOpen = 'details';
+    this._renderPopup();
+  }
+  _closeDetailsPopup() {
+    const returnTo = this._detailsView?.returnTo || 'search';
+    this._detailsView = null;
+    this._popupOpen = returnTo;
+    this._renderPopup();
   }
   _openSpeakers() {
     // Cada vez que o popup abre, sincroniza com o estado REAL do HA.
@@ -2185,7 +2357,7 @@ function escapeHtml(s) { return String(s ?? '').replace(/[<>&"']/g, c => ({'<':'
 function escapeAttr(s) { return escapeHtml(s); }
 
 /* === src/index.js === */
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 
 if (!customElements.get('soundflow-card')) {
   customElements.define('soundflow-card', SoundFlowCard);

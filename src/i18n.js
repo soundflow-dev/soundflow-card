@@ -66,7 +66,14 @@ const STRINGS = {
     volume_equalized: 'Volume igualado a {n}%',
     pending_pick_speakers: 'Selecciona uma coluna primeiro',
     pending_set: 'Pronto: carrega ▶ para tocar',
-    pending_clear: 'Pendente cancelado'
+    pending_clear: 'Pendente cancelado',
+    play_all: 'Tocar tudo',
+    play_album: 'Tocar álbum',
+    play_artist: 'Tocar tudo do artista',
+    play_all_shuffle: 'Tocar tudo (aleatório)',
+    album: 'Álbum',
+    artist: 'Artista',
+    playlist: 'Playlist'
   },
   en: {
     card_name: 'SoundFlow Card',
@@ -135,7 +142,14 @@ const STRINGS = {
     volume_equalized: 'Volume set to {n}%',
     pending_pick_speakers: 'Pick a speaker first',
     pending_set: 'Ready: tap ▶ to play',
-    pending_clear: 'Pending cleared'
+    pending_clear: 'Pending cleared',
+    play_all: 'Play all',
+    play_album: 'Play album',
+    play_artist: 'Play all by artist',
+    play_all_shuffle: 'Play all (shuffle)',
+    album: 'Album',
+    artist: 'Artist',
+    playlist: 'Playlist'
   }
 };
 

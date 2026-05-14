@@ -70,6 +70,29 @@ export async function getMusicProviders(hass) {
   return music;
 }
 
+// Drill-down: tracks dum álbum / artista / playlist.
+// `kind` ∈ {album, artist, playlist}. Devolve array normalizado de tracks com
+// shape { uri, name, artist, album, image, duration, favorite } — pronto para UI.
+export async function getItemTracks(hass, kind, uri, page = 0) {
+  const SERVICE = { album: 'get_album_tracks', artist: 'get_artist_tracks', playlist: 'get_playlist_tracks' }[kind];
+  if (!SERVICE) return [];
+  const entryId = await getMassQueueEntryId(hass);
+  if (!entryId) return [];
+  const data = { config_entry_id: entryId, uri, page };
+  const r = await callServiceWithResponse(hass, 'mass_queue', SERVICE, data);
+  const items = r?.tracks ?? r?.items ?? [];
+  if (!Array.isArray(items)) return [];
+  return items.map(it => ({
+    uri: it.media_content_id || it.uri,
+    name: it.media_title || it.name || it.title,
+    artist: it.media_artist || it.artist || it.artists?.[0]?.name || '',
+    album: it.media_album_name || it.album?.name || '',
+    image: it.media_image || it.image || it.metadata?.images?.[0]?.path,
+    duration: it.duration,
+    favorite: !!it.favorite
+  })).filter(t => t.uri);
+}
+
 // Lista tracks da biblioteca filtradas por provider (apple_music--XXX, builtin, etc.).
 // Devolve [] se mass_queue não estiver instalado.
 export async function getLibraryTracksByProvider(hass, providerInstanceId, opts = {}) {

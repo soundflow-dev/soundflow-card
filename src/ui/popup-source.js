@@ -227,14 +227,20 @@ function mediaItem(card, it, opts = {}) {
   const img = it?.image || it?.thumbnail || it?.metadata?.image;
   const title = it.name || it.title || it.uri || '';
   const sub = it.artists?.[0]?.name || it.artist || it.album?.name || '';
+  // album/artist/playlist → drill-down (chevron); track/radio → action directo (play)
+  const isDrill = opts.mediaType === 'album' || opts.mediaType === 'artist' || opts.mediaType === 'playlist';
+  const chev = isDrill ? 'chev' : 'play';
   div.innerHTML = `
     <div class="sf-li-icon" style="${img ? `background-image:url(${JSON.stringify(img).slice(1, -1)});` : ''}">${img ? '' : providerSvg('builtin', 30)}</div>
     <div class="sf-li-body">
       <div class="sf-li-title">${escapeHtml(title)}</div>
       ${sub ? `<div class="sf-li-sub">${escapeHtml(sub)}</div>` : ''}
     </div>
-    <div class="sf-li-chev">${svgIcon('play', 18)}</div>`;
-  div.addEventListener('click', () => card._playMediaItem(it, opts));
+    <div class="sf-li-chev">${svgIcon(chev, 18)}</div>`;
+  div.addEventListener('click', () => {
+    if (isDrill && it?.uri) card._openMediaDetails(it, opts.mediaType);
+    else card._playMediaItem(it, opts);
+  });
   return div;
 }
 

@@ -8,6 +8,7 @@ import * as ST from './api/state.js';
 import { renderSpeakersPopup } from './ui/popup-speakers.js';
 import { renderSourcePopup } from './ui/popup-source.js';
 import { renderSearchResults } from './ui/popup-search.js';
+import { renderDetailsPopup } from './ui/popup-details.js';
 
 export class SoundFlowCard extends HTMLElement {
   static getConfigElement() {
@@ -21,7 +22,8 @@ export class SoundFlowCard extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
     this._modalOpen = false;
-    this._popupOpen = null; // 'source' | 'speakers' | 'search' | null
+    this._popupOpen = null; // 'source' | 'speakers' | 'search' | 'details' | null
+    this._detailsView = null; // { kind: 'album'|'artist'|'playlist', item, returnTo: 'search'|'source' }
     this._selectedSpeakers = []; // memória local (preparação)
     this._lastLeader = null;
     this._sourceView = null;
@@ -291,7 +293,7 @@ export class SoundFlowCard extends HTMLElement {
     if (m) m.remove();
   }
   _closeAllPopups() {
-    if (this._popupOpen) { this._popupOpen = null; this._sourceView = null; this._renderModal(); }
+    if (this._popupOpen) { this._popupOpen = null; this._sourceView = null; this._detailsView = null; this._renderModal(); }
     else this._closeModal();
   }
   _popupHost() {
@@ -467,6 +469,19 @@ export class SoundFlowCard extends HTMLElement {
     if (this._popupOpen === 'speakers') renderSpeakersPopup(this, host);
     else if (this._popupOpen === 'source') renderSourcePopup(this, host);
     else if (this._popupOpen === 'search') renderSearchResults(this, host, this._searchResults || { _query: this._searchQuery });
+    else if (this._popupOpen === 'details') renderDetailsPopup(this, host);
+  }
+  _openMediaDetails(item, kind) {
+    if (!item || !['album', 'artist', 'playlist'].includes(kind)) return;
+    this._detailsView = { kind, item, returnTo: this._popupOpen || 'search' };
+    this._popupOpen = 'details';
+    this._renderPopup();
+  }
+  _closeDetailsPopup() {
+    const returnTo = this._detailsView?.returnTo || 'search';
+    this._detailsView = null;
+    this._popupOpen = returnTo;
+    this._renderPopup();
   }
   _openSpeakers() {
     // Cada vez que o popup abre, sincroniza com o estado REAL do HA.

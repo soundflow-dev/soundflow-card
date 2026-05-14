@@ -192,6 +192,18 @@ button:focus-visible { outline: 2px solid #C729C7; outline-offset: 2px; border-r
 .sf-li-add:hover svg { fill: white; }
 .sf-li-add:active { transform: scale(0.92); }
 .sf-li-add svg { fill: var(--sf-text); width: 16px; height: 16px; }
+.sf-modal-add-row { display: flex; justify-content: center; margin: 6px 0 10px; }
+.sf-btn-add-track {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: 18px;
+  background: var(--sf-track); color: var(--sf-text);
+  border: 0; cursor: pointer; font-size: 13px; font-weight: 600;
+  transition: background .12s ease, transform .08s ease;
+}
+.sf-btn-add-track:hover { background: ${SF_GRADIENT}; color: white; }
+.sf-btn-add-track:hover svg { fill: white; }
+.sf-btn-add-track:active { transform: scale(0.97); }
+.sf-btn-add-track svg { fill: var(--sf-text); }
 
 .sf-select-all {
   width: 100%; padding: 12px; border-radius: 12px;

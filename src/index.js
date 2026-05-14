@@ -1,7 +1,7 @@
 import { SoundFlowCard } from './card.js';
 import { SoundFlowCardEditor } from './editor.js';
 
-const VERSION = '1.0.5';
+const VERSION = '1.0.6';
 
 if (!customElements.get('soundflow-card')) {
   customElements.define('soundflow-card', SoundFlowCard);

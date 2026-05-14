@@ -84,6 +84,7 @@ export function getMediaInfo(state) {
     artist: a.media_artist || a.media_album_artist || '',
     album: a.media_album_name || '',
     image: a.entity_picture || a.media_image_url || a.album_art || null,
+    contentId: a.media_content_id || '',
     duration: Number(a.media_duration) || 0,
     position: Number(a.media_position) || 0,
     positionAt: a.media_position_updated_at ? Date.parse(a.media_position_updated_at) : Date.now(),

@@ -195,6 +195,18 @@ button:focus-visible { outline: 2px solid #C729C7; outline-offset: 2px; border-r
 .sf-li-add:hover svg { fill: white; }
 .sf-li-add:active { transform: scale(0.92); }
 .sf-li-add svg { fill: var(--sf-text); width: 16px; height: 16px; }
+.sf-modal-add-row { display: flex; justify-content: center; margin: 6px 0 10px; }
+.sf-btn-add-track {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: 18px;
+  background: var(--sf-track); color: var(--sf-text);
+  border: 0; cursor: pointer; font-size: 13px; font-weight: 600;
+  transition: background .12s ease, transform .08s ease;
+}
+.sf-btn-add-track:hover { background: ${SF_GRADIENT}; color: white; }
+.sf-btn-add-track:hover svg { fill: white; }
+.sf-btn-add-track:active { transform: scale(0.97); }
+.sf-btn-add-track svg { fill: var(--sf-text); }
 
 .sf-select-all {
   width: 100%; padding: 12px; border-radius: 12px;
@@ -1014,6 +1026,7 @@ function getMediaInfo(state) {
     artist: a.media_artist || a.media_album_artist || '',
     album: a.media_album_name || '',
     image: a.entity_picture || a.media_image_url || a.album_art || null,
+    contentId: a.media_content_id || '',
     duration: Number(a.media_duration) || 0,
     position: Number(a.media_position) || 0,
     positionAt: a.media_position_updated_at ? Date.parse(a.media_position_updated_at) : Date.now(),
@@ -1960,6 +1973,12 @@ class SoundFlowCard extends HTMLElement {
       ${cover ? `<div class="sf-modal-cover" style="background-image:url(${JSON.stringify(cover).slice(1, -1)});"></div>` : `<div class="sf-modal-cover">${svgIcon('music', 64)}</div>`}
       <div class="sf-modal-title">${escapeHtml(info.title || t(this._hass, 'nothing_playing'))}</div>
       <div class="sf-modal-artist">${escapeHtml(info.artist || s?.attributes?.friendly_name || '')}</div>
+      ${this._canAddCurrentTrack(info) ? `
+      <div class="sf-modal-add-row">
+        <button class="sf-btn-add-track" data-act="add-current" title="${escapeHtml(t(this._hass, 'add_to_library'))}">
+          ${svgIcon('plus', 16)} <span>${escapeHtml(t(this._hass, 'add_to_library'))}</span>
+        </button>
+      </div>` : ''}
 
       <div class="sf-seek">
         <span>${formatTime(pos)}</span>
@@ -2065,6 +2084,8 @@ class SoundFlowCard extends HTMLElement {
       targets.forEach(id => setMute(this._hass, id, !muted));
     });
     host.querySelector('[data-act="equalize"]').addEventListener('click', () => this._equalizeVolume());
+    const addCurBtn = host.querySelector('[data-act="add-current"]');
+    if (addCurBtn) addCurBtn.addEventListener('click', () => this._addCurrentTrack());
     const form = host.querySelector('[data-act="search-form"]');
     if (form) {
       form.addEventListener('submit', (e) => {
@@ -2239,6 +2260,31 @@ class SoundFlowCard extends HTMLElement {
       if (members.length) await joinPlayers(this._hass, leader, members);
     }
     setTimeout(() => { this._renderedSpeakersKey = ''; this._renderPopup(); }, 500);
+  }
+
+  // True quando há uma faixa concreta a tocar (com URI) e ainda não está na library.
+  // Exclui rádios (URIs como `x-sonos-htastream:`, `tunein://`, `http://…/flow/…`) e
+  // streams MA flow internos que não fazem sentido "adicionar".
+  _canAddCurrentTrack(info) {
+    const id = info?.contentId || '';
+    if (!id) return false;
+    if (id.startsWith('library://')) return false;
+    if ((info.contentType || '') === 'radio') return false;
+    if (this._addedCurrentContentId === id) return false; // já adicionado nesta sessão
+    // Aceitar apenas URIs de provider conhecido (apple_music://, spotify://, tidal://, …)
+    return /^[a-z][a-z0-9_-]*:\/\/(track|album|artist|playlist)\//i.test(id);
+  }
+  async _addCurrentTrack() {
+    const dp = this._displayPlayer();
+    const s = this._hass.states[dp];
+    const info = getMediaInfo(s);
+    if (!this._canAddCurrentTrack(info)) return;
+    const ok = await addToLibrary(this._hass, info.contentId);
+    this._toast(t(this._hass, ok ? 'added_to_library' : 'add_failed'));
+    // Forçar refresh do modal para o botão desaparecer (a Sonos pode demorar a
+    // reportar o novo URI; entretanto escondemos manualmente via flag)
+    this._addedCurrentContentId = ok ? info.contentId : null;
+    if (this._modalOpen && !this._popupOpen) this._renderModalContent();
   }
 
   _playerHasMedia(entityId) {
@@ -2530,7 +2576,7 @@ function escapeHtml(s) { return String(s ?? '').replace(/[<>&"']/g, c => ({'<':'
 function escapeAttr(s) { return escapeHtml(s); }
 
 /* === src/index.js === */
-const VERSION = '1.0.5';
+const VERSION = '1.0.6';
 
 if (!customElements.get('soundflow-card')) {
   customElements.define('soundflow-card', SoundFlowCard);

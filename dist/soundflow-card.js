@@ -1573,13 +1573,32 @@ async function renderDetailsPopup(card, container) {
   tracks.forEach((tr, idx) => {
     const row = document.createElement('button');
     row.className = 'sf-list-item';
+    const inLib = isInLibrary(tr) || tr._addedToLibrary;
+    const addBtn = inLib ? '' : `<div class="sf-li-add" data-act="add" title="${escapeHtml(t(hass, 'add_to_library'))}">${svgIcon('plus', 16)}</div>`;
     row.innerHTML = `
       <div class="sf-li-icon" style="${tr.image ? `background-image:url(${JSON.stringify(tr.image).slice(1, -1)});` : ''}">${tr.image ? '' : `<span class="sf-li-idx">${idx + 1}</span>`}</div>
       <div class="sf-li-body">
         <div class="sf-li-title">${escapeHtml(tr.name || '')}</div>
         ${(tr.artist || tr.album) ? `<div class="sf-li-sub">${escapeHtml([tr.artist, kind !== 'album' ? tr.album : ''].filter(Boolean).join(' · '))}</div>` : ''}
       </div>
+      ${addBtn}
       <div class="sf-li-chev">${svgIcon('play', 18)}</div>`;
+    // Click no "+" → add à library; não dispara o action principal
+    const addNode = row.querySelector('[data-act="add"]');
+    if (addNode) {
+      addNode.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        const ok = await addToLibrary(card._hass, tr.uri);
+        if (ok) {
+          tr._addedToLibrary = true;
+          addNode.remove();
+          card._toast(t(hass, 'added_to_library'));
+        } else {
+          card._toast(t(hass, 'add_failed'));
+        }
+      });
+    }
     row.addEventListener('click', () => {
       card._playMediaItem({ uri: tr.uri, name: tr.name, artist: tr.artist }, { mediaType: 'track' });
     });
@@ -2511,7 +2530,7 @@ function escapeHtml(s) { return String(s ?? '').replace(/[<>&"']/g, c => ({'<':'
 function escapeAttr(s) { return escapeHtml(s); }
 
 /* === src/index.js === */
-const VERSION = '1.0.4';
+const VERSION = '1.0.5';
 
 if (!customElements.get('soundflow-card')) {
   customElements.define('soundflow-card', SoundFlowCard);

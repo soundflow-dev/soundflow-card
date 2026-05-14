@@ -181,7 +181,9 @@ button:focus-visible { outline: 2px solid #C729C7; outline-offset: 2px; border-r
 .sf-list-item .sf-li-chev svg { width: 18px; height: 18px; fill: currentColor; }
 
 .sf-section-title { font-size: 11px; color: var(--sf-text-mute); text-transform: uppercase; letter-spacing: .08em; margin: 14px 4px 8px; }
-.sf-section-count { color: var(--sf-text-dim); font-weight: 400; text-transform: none; letter-spacing: 0; }
+.sf-section-count { color: var(--sf-text-dim); font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 12px; }
+.sf-li-icon-tinted { background: ${SF_GRADIENT}; display: flex; align-items: center; justify-content: center; }
+.sf-li-icon-tinted svg { fill: white; }
 
 .sf-select-all {
   width: 100%; padding: 12px; border-radius: 12px;
@@ -388,7 +390,9 @@ const STRINGS = {
     play_all_shuffle: 'Tocar tudo (aleatório)',
     album: 'Álbum',
     artist: 'Artista',
-    playlist: 'Playlist'
+    playlist: 'Playlist',
+    one_result: '1 resultado',
+    n_results: '{n} resultados'
   },
   en: {
     card_name: 'SoundFlow Card',
@@ -464,7 +468,9 @@ const STRINGS = {
     play_all_shuffle: 'Play all (shuffle)',
     album: 'Album',
     artist: 'Artist',
-    playlist: 'Playlist'
+    playlist: 'Playlist',
+    one_result: '1 result',
+    n_results: '{n} results'
   }
 };
 function getLang(hass) {
@@ -1331,15 +1337,36 @@ function mediaItem(card, it, opts = {}) {
 function escapeHtml(s) { return String(s ?? '').replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c])); }
 
 /* === src/ui/popup-search.js === */
+// Vista de pesquisa em 2 níveis:
+//  - 'sections' (default): mostra categorias com contadores (Músicas (N), Álbuns (N), …)
+//  - 'list':               mostra apenas os items da categoria escolhida
+// O state vive em `card._searchView = { view, kind? }` para sobreviver a re-renders.
+const SECTIONS = [
+  { key: 'tracks',    icon: 'music' },
+  { key: 'albums',    icon: 'album' },
+  { key: 'artists',   icon: 'artist' },
+  { key: 'playlists', icon: 'playlist' },
+  { key: 'radios',    icon: 'radio' }
+];
+const DRILLDOWN_KINDS = new Set(['albums', 'artists', 'playlists']);
 function renderSearchResults(card, container, results) {
   const hass = card._hass;
-  const sections = [
-    { key: 'tracks',    label: t(hass, 'tracks') },
-    { key: 'albums',    label: t(hass, 'albums') },
-    { key: 'artists',   label: t(hass, 'artists') },
-    { key: 'playlists', label: t(hass, 'playlists') },
-    { key: 'radios',    label: t(hass, 'radios') }
-  ];
+  const view = card._searchView || { view: 'sections' };
+  // Migrate stale views back to 'sections' if the kind has 0 results.
+  if (view.view === 'list' && !(results[view.kind] || []).length) {
+    card._searchView = { view: 'sections' };
+  }
+  const v = card._searchView || { view: 'sections' };
+
+  if (v.view === 'list') return renderItemsView(card, container, results, v.kind);
+  return renderSectionsView(card, container, results);
+}
+
+function renderSectionsView(card, container, results) {
+  const hass = card._hass;
+  const counts = SECTIONS.map(s => ({ ...s, count: (results[s.key] || []).length, label: t(hass, s.key) }));
+  const total = counts.reduce((a, b) => a + b.count, 0);
+
   let html = `
     <div class="sf-modal-header sf-with-back">
       <button class="sf-circle-btn" data-act="back">${svgIcon('back', 18)}</button>
@@ -1347,50 +1374,89 @@ function renderSearchResults(card, container, results) {
       <button class="sf-circle-btn" data-act="close">${svgIcon('close', 18)}</button>
     </div>`;
 
-  let any = false;
-  for (const s of sections) {
-    const items = results[s.key] || [];
-    if (!items.length) continue;
-    any = true;
-    const shown = items.slice(0, 50);
-    const more = items.length > shown.length ? ` <span class="sf-section-count">(${shown.length})</span>` : '';
-    html += `<div class="sf-section-title">${s.label}${more}</div><div class="sf-list" data-sec="${s.key}">`;
-    for (const it of shown) {
-      html += searchItemHtml(it, s.key);
-    }
-    html += `</div>`;
+  if (total === 0) {
+    html += `<div class="sf-empty">${t(hass, 'no_results')}</div>`;
+    container.innerHTML = html;
+    wireHeader(card, container, /*backToSections*/ false);
+    return;
   }
-  if (!any) html += `<div class="sf-empty">${t(hass, 'no_results')}</div>`;
+
+  html += `<div class="sf-list">`;
+  for (const s of counts) {
+    if (!s.count) continue; // esconder secções vazias
+    html += `
+      <button class="sf-list-item" data-sec="${s.key}">
+        <div class="sf-li-icon sf-li-icon-tinted">${svgIcon(s.icon, 28)}</div>
+        <div class="sf-li-body">
+          <div class="sf-li-title">${escapeHtml(s.label)}</div>
+          <div class="sf-li-sub">${plural(card._hass, s.count, 'one_result', 'n_results')}</div>
+        </div>
+        <div class="sf-li-chev">${svgIcon('chev', 18)}</div>
+      </button>`;
+  }
+  html += `</div>`;
 
   container.innerHTML = html;
-  container.querySelector('[data-act="close"]').addEventListener('click', () => card._closeAllPopups());
-  container.querySelector('[data-act="back"]').addEventListener('click', () => card._renderModal());
-
-  // Drill-down vs play directo:
-  //  - tracks/radios → click = tocar imediato
-  //  - albums/artists/playlists → click = abrir details (escolher track ou Play all)
-  const DRILLDOWN = new Set(['albums', 'artists', 'playlists']);
-  for (const s of sections) {
-    const sec = container.querySelector(`[data-sec="${s.key}"]`);
-    if (!sec) continue;
-    const items = results[s.key] || [];
-    [...sec.querySelectorAll('.sf-list-item')].forEach((node, idx) => {
-      const it = items[idx];
-      const mediaType = s.key.slice(0, -1); // tracks → track
-      node.addEventListener('click', () => {
-        if (DRILLDOWN.has(s.key) && it?.uri) card._openMediaDetails(it, mediaType);
-        else card._playMediaItem(it, { mediaType });
-      });
+  wireHeader(card, container, /*backToSections*/ false);
+  container.querySelectorAll('[data-sec]').forEach(node => {
+    node.addEventListener('click', () => {
+      card._searchView = { view: 'list', kind: node.dataset.sec };
+      card._renderPopup();
     });
-  }
+  });
+}
+
+function renderItemsView(card, container, results, kind) {
+  const hass = card._hass;
+  const label = t(hass, kind) || kind;
+  const items = results[kind] || [];
+  const shown = items.slice(0, 50);
+  const cap = items.length > shown.length ? ` <span class="sf-section-count">(${shown.length}/${items.length})</span>` : '';
+
+  let html = `
+    <div class="sf-modal-header sf-with-back">
+      <button class="sf-circle-btn" data-act="back">${svgIcon('back', 18)}</button>
+      <h2>${escapeHtml(label)}${cap}</h2>
+      <button class="sf-circle-btn" data-act="close">${svgIcon('close', 18)}</button>
+    </div>
+    <div class="sf-li-sub" style="margin: -4px 4px 8px; font-size: 12px;">${escapeHtml(results._query || '')}</div>
+    <div class="sf-list" data-sec="${kind}">`;
+  for (const it of shown) html += searchItemHtml(it, kind);
+  html += `</div>`;
+
+  container.innerHTML = html;
+  wireHeader(card, container, /*backToSections*/ true);
+
+  const sec = container.querySelector(`[data-sec="${kind}"]`);
+  [...sec.querySelectorAll('.sf-list-item')].forEach((node, idx) => {
+    const it = items[idx];
+    const mediaType = kind.slice(0, -1); // tracks → track
+    node.addEventListener('click', () => {
+      if (DRILLDOWN_KINDS.has(kind) && it?.uri) card._openMediaDetails(it, mediaType);
+      else card._playMediaItem(it, { mediaType });
+    });
+  });
+}
+
+function wireHeader(card, container, backToSections) {
+  container.querySelector('[data-act="close"]').addEventListener('click', () => card._closeAllPopups());
+  container.querySelector('[data-act="back"]').addEventListener('click', () => {
+    if (backToSections) {
+      card._searchView = { view: 'sections' };
+      card._renderPopup();
+    } else {
+      // sair da pesquisa — volta ao modal
+      card._searchView = null;
+      card._renderModal();
+    }
+  });
 }
 
 function searchItemHtml(it, kind) {
   const img = it?.image || it?.metadata?.image || it?.images?.[0]?.path;
   const title = it.name || it.title || it.uri || '';
   const sub = it.artist || it.artists?.[0]?.name || it.album?.name || it.subtitle || '';
-  // Chevron para drill-down (album/artist/playlist), play para action imediato (track/radio)
-  const isDrill = kind === 'albums' || kind === 'artists' || kind === 'playlists';
+  const isDrill = DRILLDOWN_KINDS.has(kind);
   const chev = isDrill ? 'chev' : 'play';
   return `
     <button class="sf-list-item">
@@ -1770,7 +1836,7 @@ class SoundFlowCard extends HTMLElement {
     if (m) m.remove();
   }
   _closeAllPopups() {
-    if (this._popupOpen) { this._popupOpen = null; this._sourceView = null; this._detailsView = null; this._renderModal(); }
+    if (this._popupOpen) { this._popupOpen = null; this._sourceView = null; this._detailsView = null; this._searchView = null; this._renderModal(); }
     else this._closeModal();
   }
   _popupHost() {
@@ -2233,6 +2299,7 @@ class SoundFlowCard extends HTMLElement {
   async _runSearch(query) {
     this._searchQuery = query;
     this._popupOpen = 'search';
+    this._searchView = { view: 'sections' }; // reset à vista de categorias em cada nova pesquisa
     this._searchResults = { _query: query, tracks: [], albums: [], artists: [], playlists: [], radios: [] };
     this._renderPopup();
     // Tenta primeiro library-only (na biblioteca selecionada via último provider, se houver)
@@ -2372,7 +2439,7 @@ function escapeHtml(s) { return String(s ?? '').replace(/[<>&"']/g, c => ({'<':'
 function escapeAttr(s) { return escapeHtml(s); }
 
 /* === src/index.js === */
-const VERSION = '1.0.2';
+const VERSION = '1.0.3';
 
 if (!customElements.get('soundflow-card')) {
   customElements.define('soundflow-card', SoundFlowCard);

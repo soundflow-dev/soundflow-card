@@ -73,7 +73,9 @@ const STRINGS = {
     play_all_shuffle: 'Tocar tudo (aleatório)',
     album: 'Álbum',
     artist: 'Artista',
-    playlist: 'Playlist'
+    playlist: 'Playlist',
+    one_result: '1 resultado',
+    n_results: '{n} resultados'
   },
   en: {
     card_name: 'SoundFlow Card',
@@ -149,7 +151,9 @@ const STRINGS = {
     play_all_shuffle: 'Play all (shuffle)',
     album: 'Album',
     artist: 'Artist',
-    playlist: 'Playlist'
+    playlist: 'Playlist',
+    one_result: '1 result',
+    n_results: '{n} results'
   }
 };
 

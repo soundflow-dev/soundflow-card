@@ -293,7 +293,7 @@ export class SoundFlowCard extends HTMLElement {
     if (m) m.remove();
   }
   _closeAllPopups() {
-    if (this._popupOpen) { this._popupOpen = null; this._sourceView = null; this._detailsView = null; this._renderModal(); }
+    if (this._popupOpen) { this._popupOpen = null; this._sourceView = null; this._detailsView = null; this._searchView = null; this._renderModal(); }
     else this._closeModal();
   }
   _popupHost() {
@@ -756,6 +756,7 @@ export class SoundFlowCard extends HTMLElement {
   async _runSearch(query) {
     this._searchQuery = query;
     this._popupOpen = 'search';
+    this._searchView = { view: 'sections' }; // reset à vista de categorias em cada nova pesquisa
     this._searchResults = { _query: query, tracks: [], albums: [], artists: [], playlists: [], radios: [] };
     this._renderPopup();
     // Tenta primeiro library-only (na biblioteca selecionada via último provider, se houver)

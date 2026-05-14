@@ -178,7 +178,9 @@ button:focus-visible { outline: 2px solid #C729C7; outline-offset: 2px; border-r
 .sf-list-item .sf-li-chev svg { width: 18px; height: 18px; fill: currentColor; }
 
 .sf-section-title { font-size: 11px; color: var(--sf-text-mute); text-transform: uppercase; letter-spacing: .08em; margin: 14px 4px 8px; }
-.sf-section-count { color: var(--sf-text-dim); font-weight: 400; text-transform: none; letter-spacing: 0; }
+.sf-section-count { color: var(--sf-text-dim); font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 12px; }
+.sf-li-icon-tinted { background: ${SF_GRADIENT}; display: flex; align-items: center; justify-content: center; }
+.sf-li-icon-tinted svg { fill: white; }
 
 .sf-select-all {
   width: 100%; padding: 12px; border-radius: 12px;

@@ -73,16 +73,28 @@ export async function getMusicProviders(hass) {
 // Drill-down: tracks dum álbum / artista / playlist.
 // `kind` ∈ {album, artist, playlist}. Devolve array normalizado de tracks com
 // shape { uri, name, artist, album, image, duration, favorite } — pronto para UI.
-export async function getItemTracks(hass, kind, uri, page = 0) {
+// O serviço mass_queue é paginado (~15-25 items/page sem campo `limit`), por isso
+// loopamos páginas até a resposta vir vazia. Cap defensivo em maxPages para evitar
+// loops infinitos em playlists muito grandes (default 10 = ~250 tracks).
+export async function getItemTracks(hass, kind, uri, opts = {}) {
   const SERVICE = { album: 'get_album_tracks', artist: 'get_artist_tracks', playlist: 'get_playlist_tracks' }[kind];
   if (!SERVICE) return [];
   const entryId = await getMassQueueEntryId(hass);
   if (!entryId) return [];
-  const data = { config_entry_id: entryId, uri, page };
-  const r = await callServiceWithResponse(hass, 'mass_queue', SERVICE, data);
-  const items = r?.tracks ?? r?.items ?? [];
-  if (!Array.isArray(items)) return [];
-  return items.map(it => ({
+  const maxPages = opts.maxPages || 10;
+  const all = [];
+  let prevSize = -1;
+  for (let page = 0; page < maxPages; page++) {
+    const data = { config_entry_id: entryId, uri, page };
+    const r = await callServiceWithResponse(hass, 'mass_queue', SERVICE, data);
+    const items = r?.tracks ?? r?.items ?? [];
+    if (!Array.isArray(items) || items.length === 0) break;
+    all.push(...items);
+    // Se devolveu menos que a página anterior, presumivelmente é a última
+    if (prevSize > 0 && items.length < prevSize) break;
+    prevSize = items.length;
+  }
+  return all.map(it => ({
     uri: it.media_content_id || it.uri,
     name: it.media_title || it.name || it.title,
     artist: it.media_artist || it.artist || it.artists?.[0]?.name || '',
@@ -182,7 +194,7 @@ export async function search(hass, _entryId, query, opts = {}) {
   const data = {
     config_entry_id: entryId,
     name: query,
-    limit: opts.limit || 20,
+    limit: opts.limit || 50,
     library_only: !!opts.libraryOnly
   };
   if (opts.mediaTypes && opts.mediaTypes.length) data.media_type = opts.mediaTypes;

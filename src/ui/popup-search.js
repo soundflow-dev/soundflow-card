@@ -23,8 +23,10 @@ export function renderSearchResults(card, container, results) {
     const items = results[s.key] || [];
     if (!items.length) continue;
     any = true;
-    html += `<div class="sf-section-title">${s.label}</div><div class="sf-list" data-sec="${s.key}">`;
-    for (const it of items.slice(0, 25)) {
+    const shown = items.slice(0, 50);
+    const more = items.length > shown.length ? ` <span class="sf-section-count">(${shown.length})</span>` : '';
+    html += `<div class="sf-section-title">${s.label}${more}</div><div class="sf-list" data-sec="${s.key}">`;
+    for (const it of shown) {
       html += searchItemHtml(it, s.key);
     }
     html += `</div>`;

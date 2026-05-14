@@ -181,6 +181,17 @@ button:focus-visible { outline: 2px solid #C729C7; outline-offset: 2px; border-r
 .sf-section-count { color: var(--sf-text-dim); font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 12px; }
 .sf-li-icon-tinted { background: ${SF_GRADIENT}; display: flex; align-items: center; justify-content: center; }
 .sf-li-icon-tinted svg { fill: white; }
+.sf-li-add {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 50%;
+  margin-right: 6px; flex-shrink: 0;
+  background: var(--sf-track); color: var(--sf-text);
+  cursor: pointer; transition: background .12s ease, transform .08s ease;
+}
+.sf-li-add:hover { background: ${SF_GRADIENT}; }
+.sf-li-add:hover svg { fill: white; }
+.sf-li-add:active { transform: scale(0.92); }
+.sf-li-add svg { fill: var(--sf-text); width: 16px; height: 16px; }
 
 .sf-select-all {
   width: 100%; padding: 12px; border-radius: 12px;

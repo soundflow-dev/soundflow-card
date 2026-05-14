@@ -1,6 +1,7 @@
 import { svgIcon } from '../icons.js';
 import { t, plural } from '../i18n.js';
 import { providerSvg } from '../providers.js';
+import * as MA from '../api/ma.js';
 
 // Vista de pesquisa em 2 níveis:
 //  - 'sections' (default): mostra categorias com contadores (Músicas (N), Álbuns (N), …)
@@ -87,7 +88,7 @@ function renderItemsView(card, container, results, kind) {
     </div>
     <div class="sf-li-sub" style="margin: -4px 4px 8px; font-size: 12px;">${escapeHtml(results._query || '')}</div>
     <div class="sf-list" data-sec="${kind}">`;
-  for (const it of shown) html += searchItemHtml(it, kind);
+  for (const it of shown) html += searchItemHtml(it, kind, hass);
   html += `</div>`;
 
   container.innerHTML = html;
@@ -97,6 +98,16 @@ function renderItemsView(card, container, results, kind) {
   [...sec.querySelectorAll('.sf-list-item')].forEach((node, idx) => {
     const it = items[idx];
     const mediaType = kind.slice(0, -1); // tracks → track
+    // Click no botão "+" → adicionar à biblioteca (não dispara o action principal)
+    const addBtn = node.querySelector('[data-act="add"]');
+    if (addBtn) {
+      addBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        card._addItemToLibrary(it);
+      });
+    }
+    // Click na linha → drill-down ou play
     node.addEventListener('click', () => {
       if (DRILLDOWN_KINDS.has(kind) && it?.uri) card._openMediaDetails(it, mediaType);
       else card._playMediaItem(it, { mediaType });
@@ -118,12 +129,16 @@ function wireHeader(card, container, backToSections) {
   });
 }
 
-function searchItemHtml(it, kind) {
+function searchItemHtml(it, kind, hass) {
   const img = it?.image || it?.metadata?.image || it?.images?.[0]?.path;
   const title = it.name || it.title || it.uri || '';
   const sub = it.artist || it.artists?.[0]?.name || it.album?.name || it.subtitle || '';
   const isDrill = DRILLDOWN_KINDS.has(kind);
   const chev = isDrill ? 'chev' : 'play';
+  // Mostrar "+" para items que ainda não estão na biblioteca local (URI != library://)
+  // e que ainda não foram adicionados nesta sessão. Rádios não suportam add-to-library.
+  const inLib = MA.isInLibrary(it) || it._addedToLibrary;
+  const showAdd = !inLib && kind !== 'radios';
   return `
     <button class="sf-list-item">
       <div class="sf-li-icon" style="${img ? `background-image:url(${JSON.stringify(img).slice(1, -1)});` : ''}">${img ? '' : providerSvg(it.provider || 'builtin', 30)}</div>
@@ -131,6 +146,7 @@ function searchItemHtml(it, kind) {
         <div class="sf-li-title">${escapeHtml(title)}</div>
         ${sub ? `<div class="sf-li-sub">${escapeHtml(sub)}</div>` : ''}
       </div>
+      ${showAdd ? `<div class="sf-li-add" data-act="add" title="${escapeHtml(t(hass, 'add_to_library'))}">${svgIcon('plus', 16)}</div>` : ''}
       <div class="sf-li-chev">${svgIcon(chev, 18)}</div>
     </button>`;
 }

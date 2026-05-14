@@ -184,6 +184,17 @@ button:focus-visible { outline: 2px solid #C729C7; outline-offset: 2px; border-r
 .sf-section-count { color: var(--sf-text-dim); font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 12px; }
 .sf-li-icon-tinted { background: ${SF_GRADIENT}; display: flex; align-items: center; justify-content: center; }
 .sf-li-icon-tinted svg { fill: white; }
+.sf-li-add {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 50%;
+  margin-right: 6px; flex-shrink: 0;
+  background: var(--sf-track); color: var(--sf-text);
+  cursor: pointer; transition: background .12s ease, transform .08s ease;
+}
+.sf-li-add:hover { background: ${SF_GRADIENT}; }
+.sf-li-add:hover svg { fill: white; }
+.sf-li-add:active { transform: scale(0.92); }
+.sf-li-add svg { fill: var(--sf-text); width: 16px; height: 16px; }
 
 .sf-select-all {
   width: 100%; padding: 12px; border-radius: 12px;
@@ -392,7 +403,11 @@ const STRINGS = {
     artist: 'Artista',
     playlist: 'Playlist',
     one_result: '1 resultado',
-    n_results: '{n} resultados'
+    n_results: '{n} resultados',
+    add_to_library: 'Adicionar à biblioteca',
+    added_to_library: 'Adicionado à biblioteca',
+    already_in_library: 'Já está na biblioteca',
+    add_failed: 'Não foi possível adicionar'
   },
   en: {
     card_name: 'SoundFlow Card',
@@ -470,7 +485,11 @@ const STRINGS = {
     artist: 'Artist',
     playlist: 'Playlist',
     one_result: '1 result',
-    n_results: '{n} results'
+    n_results: '{n} results',
+    add_to_library: 'Add to library',
+    added_to_library: 'Added to library',
+    already_in_library: 'Already in library',
+    add_failed: 'Could not add'
   }
 };
 function getLang(hass) {
@@ -706,6 +725,22 @@ async function getItemTracks(hass, kind, uri, opts = {}) {
   })).filter(t => t.uri);
 }
 
+// Adiciona um item (track/album/artist/playlist) à biblioteca via provider.
+// `uri` é tipicamente `apple_music://album/X` ou `spotify://track/Y` (catálogo).
+// MA escolhe automaticamente a instance de provider correcta (ex.: a primária do
+// Apple Music) e devolve o novo `library://...` URI. Idempotente: chamar duas
+// vezes não duplica. Devolve true em sucesso.
+async function addToLibrary(hass, uri) {
+  const r = await massQueueSendCommand(hass, 'music/library/add_item', { item: uri });
+  return !!(r && (r.uri || r.item_id || r.in_library !== false));
+}
+
+// Helper síncrono — basta inspeccionar o URI para saber se um item já está na biblioteca.
+function isInLibrary(item) {
+  const uri = item?.uri || item?.media_content_id || '';
+  return uri.startsWith('library://');
+}
+
 // Lista tracks da biblioteca filtradas por provider (apple_music--XXX, builtin, etc.).
 // Devolve [] se mass_queue não estiver instalado.
 async function getLibraryTracksByProvider(hass, providerInstanceId, opts = {}) {
@@ -793,7 +828,9 @@ async function search(hass, _entryId, query, opts = {}) {
     config_entry_id: entryId,
     name: query,
     limit: opts.limit || 50,
-    library_only: !!opts.libraryOnly
+    // Por defeito, pesquisar TODO o catálogo (library + provider). Caller pode
+    // forçar `libraryOnly: true` para só a biblioteca local.
+    library_only: opts.libraryOnly === true
   };
   if (opts.mediaTypes && opts.mediaTypes.length) data.media_type = opts.mediaTypes;
   const r = await callServiceWithResponse(hass, 'music_assistant', 'search', data);
@@ -1421,7 +1458,7 @@ function renderItemsView(card, container, results, kind) {
     </div>
     <div class="sf-li-sub" style="margin: -4px 4px 8px; font-size: 12px;">${escapeHtml(results._query || '')}</div>
     <div class="sf-list" data-sec="${kind}">`;
-  for (const it of shown) html += searchItemHtml(it, kind);
+  for (const it of shown) html += searchItemHtml(it, kind, hass);
   html += `</div>`;
 
   container.innerHTML = html;
@@ -1431,6 +1468,16 @@ function renderItemsView(card, container, results, kind) {
   [...sec.querySelectorAll('.sf-list-item')].forEach((node, idx) => {
     const it = items[idx];
     const mediaType = kind.slice(0, -1); // tracks → track
+    // Click no botão "+" → adicionar à biblioteca (não dispara o action principal)
+    const addBtn = node.querySelector('[data-act="add"]');
+    if (addBtn) {
+      addBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        card._addItemToLibrary(it);
+      });
+    }
+    // Click na linha → drill-down ou play
     node.addEventListener('click', () => {
       if (DRILLDOWN_KINDS.has(kind) && it?.uri) card._openMediaDetails(it, mediaType);
       else card._playMediaItem(it, { mediaType });
@@ -1452,12 +1499,16 @@ function wireHeader(card, container, backToSections) {
   });
 }
 
-function searchItemHtml(it, kind) {
+function searchItemHtml(it, kind, hass) {
   const img = it?.image || it?.metadata?.image || it?.images?.[0]?.path;
   const title = it.name || it.title || it.uri || '';
   const sub = it.artist || it.artists?.[0]?.name || it.album?.name || it.subtitle || '';
   const isDrill = DRILLDOWN_KINDS.has(kind);
   const chev = isDrill ? 'chev' : 'play';
+  // Mostrar "+" para items que ainda não estão na biblioteca local (URI != library://)
+  // e que ainda não foram adicionados nesta sessão. Rádios não suportam add-to-library.
+  const inLib = isInLibrary(it) || it._addedToLibrary;
+  const showAdd = !inLib && kind !== 'radios';
   return `
     <button class="sf-list-item">
       <div class="sf-li-icon" style="${img ? `background-image:url(${JSON.stringify(img).slice(1, -1)});` : ''}">${img ? '' : providerSvg(it.provider || 'builtin', 30)}</div>
@@ -1465,6 +1516,7 @@ function searchItemHtml(it, kind) {
         <div class="sf-li-title">${escapeHtml(title)}</div>
         ${sub ? `<div class="sf-li-sub">${escapeHtml(sub)}</div>` : ''}
       </div>
+      ${showAdd ? `<div class="sf-li-add" data-act="add" title="${escapeHtml(t(hass, 'add_to_library'))}">${svgIcon('plus', 16)}</div>` : ''}
       <div class="sf-li-chev">${svgIcon(chev, 18)}</div>
     </button>`;
 }
@@ -2302,15 +2354,35 @@ class SoundFlowCard extends HTMLElement {
     this._searchView = { view: 'sections' }; // reset à vista de categorias em cada nova pesquisa
     this._searchResults = { _query: query, tracks: [], albums: [], artists: [], playlists: [], radios: [] };
     this._renderPopup();
-    // Tenta primeiro library-only (na biblioteca selecionada via último provider, se houver)
+    // Pesquisa todo o catálogo (library + providers). Items já existentes na
+    // biblioteca aparecem com URI `library://...`; do catálogo vêm com
+    // `apple_music://...`, `spotify://...`, etc. — o popup mostra um "+" para
+    // adicionar os do catálogo à biblioteca.
     const provider = this._sourceView?.provider?.instance || null;
-    let r = await search(this._hass, null, query, { libraryOnly: true, providerInstanceId: provider });
-    const isEmpty = !r || (!r.tracks?.length && !r.albums?.length && !r.artists?.length && !r.playlists?.length && !r.radios?.length);
-    if (isEmpty) {
-      r = await search(this._hass, null, query, { libraryOnly: false, providerInstanceId: provider });
-    }
+    const r = await search(this._hass, null, query, { libraryOnly: false, providerInstanceId: provider });
     this._searchResults = { _query: query, ...r };
     this._renderPopup();
+  }
+  async _addItemToLibrary(item) {
+    if (!item?.uri) return;
+    if (isInLibrary(item)) {
+      this._toast(t(this._hass, 'already_in_library'));
+      return;
+    }
+    const ok = await addToLibrary(this._hass, item.uri);
+    if (ok) {
+      // marca como in-library no resultado actual para o "+" desaparecer
+      for (const arr of Object.values(this._searchResults || {})) {
+        if (Array.isArray(arr)) {
+          const found = arr.find(it => it?.uri === item.uri);
+          if (found) found._addedToLibrary = true;
+        }
+      }
+      this._toast(t(this._hass, 'added_to_library'));
+      this._renderPopup();
+    } else {
+      this._toast(t(this._hass, 'add_failed'));
+    }
   }
 
   // ============ UTILS ============
@@ -2439,7 +2511,7 @@ function escapeHtml(s) { return String(s ?? '').replace(/[<>&"']/g, c => ({'<':'
 function escapeAttr(s) { return escapeHtml(s); }
 
 /* === src/index.js === */
-const VERSION = '1.0.3';
+const VERSION = '1.0.4';
 
 if (!customElements.get('soundflow-card')) {
   customElements.define('soundflow-card', SoundFlowCard);

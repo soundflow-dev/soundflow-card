@@ -105,6 +105,22 @@ export async function getItemTracks(hass, kind, uri, opts = {}) {
   })).filter(t => t.uri);
 }
 
+// Adiciona um item (track/album/artist/playlist) à biblioteca via provider.
+// `uri` é tipicamente `apple_music://album/X` ou `spotify://track/Y` (catálogo).
+// MA escolhe automaticamente a instance de provider correcta (ex.: a primária do
+// Apple Music) e devolve o novo `library://...` URI. Idempotente: chamar duas
+// vezes não duplica. Devolve true em sucesso.
+export async function addToLibrary(hass, uri) {
+  const r = await massQueueSendCommand(hass, 'music/library/add_item', { item: uri });
+  return !!(r && (r.uri || r.item_id || r.in_library !== false));
+}
+
+// Helper síncrono — basta inspeccionar o URI para saber se um item já está na biblioteca.
+export function isInLibrary(item) {
+  const uri = item?.uri || item?.media_content_id || '';
+  return uri.startsWith('library://');
+}
+
 // Lista tracks da biblioteca filtradas por provider (apple_music--XXX, builtin, etc.).
 // Devolve [] se mass_queue não estiver instalado.
 export async function getLibraryTracksByProvider(hass, providerInstanceId, opts = {}) {
@@ -195,7 +211,9 @@ export async function search(hass, _entryId, query, opts = {}) {
     config_entry_id: entryId,
     name: query,
     limit: opts.limit || 50,
-    library_only: !!opts.libraryOnly
+    // Por defeito, pesquisar TODO o catálogo (library + provider). Caller pode
+    // forçar `libraryOnly: true` para só a biblioteca local.
+    library_only: opts.libraryOnly === true
   };
   if (opts.mediaTypes && opts.mediaTypes.length) data.media_type = opts.mediaTypes;
   const r = await callServiceWithResponse(hass, 'music_assistant', 'search', data);

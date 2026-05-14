@@ -75,7 +75,11 @@ const STRINGS = {
     artist: 'Artista',
     playlist: 'Playlist',
     one_result: '1 resultado',
-    n_results: '{n} resultados'
+    n_results: '{n} resultados',
+    add_to_library: 'Adicionar à biblioteca',
+    added_to_library: 'Adicionado à biblioteca',
+    already_in_library: 'Já está na biblioteca',
+    add_failed: 'Não foi possível adicionar'
   },
   en: {
     card_name: 'SoundFlow Card',
@@ -153,7 +157,11 @@ const STRINGS = {
     artist: 'Artist',
     playlist: 'Playlist',
     one_result: '1 result',
-    n_results: '{n} results'
+    n_results: '{n} results',
+    add_to_library: 'Add to library',
+    added_to_library: 'Added to library',
+    already_in_library: 'Already in library',
+    add_failed: 'Could not add'
   }
 };
 

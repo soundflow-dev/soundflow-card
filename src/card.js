@@ -759,15 +759,35 @@ export class SoundFlowCard extends HTMLElement {
     this._searchView = { view: 'sections' }; // reset à vista de categorias em cada nova pesquisa
     this._searchResults = { _query: query, tracks: [], albums: [], artists: [], playlists: [], radios: [] };
     this._renderPopup();
-    // Tenta primeiro library-only (na biblioteca selecionada via último provider, se houver)
+    // Pesquisa todo o catálogo (library + providers). Items já existentes na
+    // biblioteca aparecem com URI `library://...`; do catálogo vêm com
+    // `apple_music://...`, `spotify://...`, etc. — o popup mostra um "+" para
+    // adicionar os do catálogo à biblioteca.
     const provider = this._sourceView?.provider?.instance || null;
-    let r = await MA.search(this._hass, null, query, { libraryOnly: true, providerInstanceId: provider });
-    const isEmpty = !r || (!r.tracks?.length && !r.albums?.length && !r.artists?.length && !r.playlists?.length && !r.radios?.length);
-    if (isEmpty) {
-      r = await MA.search(this._hass, null, query, { libraryOnly: false, providerInstanceId: provider });
-    }
+    const r = await MA.search(this._hass, null, query, { libraryOnly: false, providerInstanceId: provider });
     this._searchResults = { _query: query, ...r };
     this._renderPopup();
+  }
+  async _addItemToLibrary(item) {
+    if (!item?.uri) return;
+    if (MA.isInLibrary(item)) {
+      this._toast(t(this._hass, 'already_in_library'));
+      return;
+    }
+    const ok = await MA.addToLibrary(this._hass, item.uri);
+    if (ok) {
+      // marca como in-library no resultado actual para o "+" desaparecer
+      for (const arr of Object.values(this._searchResults || {})) {
+        if (Array.isArray(arr)) {
+          const found = arr.find(it => it?.uri === item.uri);
+          if (found) found._addedToLibrary = true;
+        }
+      }
+      this._toast(t(this._hass, 'added_to_library'));
+      this._renderPopup();
+    } else {
+      this._toast(t(this._hass, 'add_failed'));
+    }
   }
 
   // ============ UTILS ============
